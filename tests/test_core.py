@@ -257,6 +257,44 @@ class RoundOneTest(unittest.TestCase):
         self.assertEqual(argv[argv.index("--output") + 1], "-")
 
 
+class RoundTwoTest(unittest.TestCase):
+    def test_deeply_nested_json_is_invalid_not_a_crash(self):
+        deep = "[" * 200_000 + "]" * 200_000
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "manifest.json"
+            path.write_text(deep)
+            self.assertIsNone(core.read_json_file(path, 1024 * 1024))
+        with mock.patch.object(core, "run", return_value=core.Result(0, deep)):
+            self.assertIsNone(core.shell_plugins())
+            self.assertEqual(marketplace.download()[0], None)
+        with self.assertRaises(ValueError):
+            core.parse_setting(deep, [])
+
+    def test_changed_layout_is_not_acted_on(self):
+        shown = {"left": [{"id": "a.b", "index": 0, "settings": {}}]}
+        now = {"bar": {"layout": {"left": [{"id": "x.y"}, {"id": "a.b"}]}}}
+        with mock.patch.object(core, "shell_config", return_value=now), \
+                mock.patch.object(core, "shell_call") as call:
+            self.assertFalse(core.move("a.b", "left", 0, "right", 0, shown).ok)
+            self.assertFalse(core.set_setting("a.b", "k", 1, "left", 0, shown).ok)
+            call.assert_not_called()
+        same = {"bar": {"layout": {"left": [{"id": "a.b"}]}}}
+        with mock.patch.object(core, "shell_config", return_value=same), \
+                mock.patch.object(core, "shell_call", return_value=core.Result(0, "ok")) as call:
+            self.assertTrue(core.move("a.b", "left", 0, "right", 0, shown).ok)
+            call.assert_called_once()
+
+    def test_theme_fifo_does_not_block(self):
+        import os as _os, time as _t
+        import theme
+        with tempfile.TemporaryDirectory() as tmp:
+            fifo = Path(tmp) / "colors.toml"
+            _os.mkfifo(fifo)
+            start = _t.monotonic()
+            self.assertEqual(theme.read_colors(fifo), theme.DEFAULTS)
+            self.assertLess(_t.monotonic() - start, 1)
+
+
 class MarketplaceTest(unittest.TestCase):
     def test_slim_keeps_installable_github_entries(self):
         catalog = {"plugins": [

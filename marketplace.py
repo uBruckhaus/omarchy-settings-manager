@@ -79,7 +79,7 @@ def download() -> tuple:
         return None, result.err.strip() or "download failed"
     try:
         data = json.loads(result.out)
-    except ValueError:
+    except (ValueError, RecursionError):
         return None, "the catalog is not JSON"
     entries = slim(data)
     if not entries:

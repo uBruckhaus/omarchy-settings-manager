@@ -182,7 +182,7 @@ def read_json_file(path: Path, max_bytes: int = MAX_MANIFEST):
         return None
     try:
         return json.loads(data.decode("utf-8", "replace"))
-    except ValueError:
+    except (ValueError, RecursionError):            # deep nesting fits in the size cap
         return None
 
 
@@ -193,7 +193,7 @@ def shell_plugins() -> list | None:
         return None
     try:
         data = json.loads(result.out)
-    except ValueError:
+    except (ValueError, RecursionError):
         return None
     return [p for p in data if isinstance(p, dict) and valid_id(p.get("id"))] if isinstance(data, list) else None
 
@@ -206,7 +206,7 @@ def shell_config() -> dict:
             data = json.loads(result.out)
             if isinstance(data, dict):
                 return data
-        except ValueError:
+        except (ValueError, RecursionError):
             pass
     data = read_json_file(SHELL_JSON, 4 * 1024 * 1024)
     return data if isinstance(data, dict) else {}
@@ -421,11 +421,32 @@ def take_out(plugin_id: str) -> Result:
     return run(["omarchy-plugin-disable", plugin_id], timeout=20)
 
 
-def move(plugin_id: str, from_section: str, from_index: int, section: str, index: int) -> Result:
+def sections_now(sections) -> dict:
+    """The named sections of the bar as the shell has them right now."""
+    layout = bar_layout(shell_config())
+    return {name: layout.get(name, []) for name in sections}
+
+
+def check_unchanged(expected: dict | None) -> Result | None:
+    """Before a change: the sections it touches must still be what the window showed (ids,
+    order, settings), so a layout changed meanwhile by another tool is never acted on blindly.
+    None: unchanged (or nothing to compare); else a failed Result."""
+    if not expected:
+        return None
+    if sections_now(expected) != expected:
+        return Result(1, "", "the bar changed meanwhile; look again and retry")
+    return None
+
+
+def move(plugin_id: str, from_section: str, from_index: int, section: str, index: int,
+         expected: dict | None = None) -> Result:
     """Move one bar entry (the one at from_section[from_index]) to section[index]; the index counts
     the target section without the moved entry."""
     if not valid_id(plugin_id) or from_section not in SECTIONS or section not in SECTIONS:
         return Result(None, "", "invalid move")
+    stale = check_unchanged(expected)
+    if stale:
+        return stale
     placement = {"fromSection": from_section, "fromIndex": int(from_index), "section": section,
                  "index": max(0, int(index))}
     result = shell_call("moveBarWidget", plugin_id, json.dumps(placement))
@@ -465,10 +486,13 @@ def drop_index(from_section: str, from_position: int, section: str, position: in
     return position
 
 
-def set_setting(plugin_id: str, key: str, value, section: str, index: int) -> Result:
+def set_setting(plugin_id: str, key: str, value, section: str, index: int, expected: dict | None = None) -> Result:
     """Change one key of a bar entry (`setBarWidget`); the entry is named by section and index."""
     if not valid_id(plugin_id) or not SETTING_KEY_RE.match(key or "") or key == "id" or section not in SECTIONS:
         return Result(None, "", "invalid setting")
+    stale = check_unchanged(expected)
+    if stale:
+        return stale
     selector = {"section": section, "index": int(index)}
     return _ipc_result(shell_call("setBarWidget", plugin_id, key, json.dumps(value), json.dumps(selector)))
 
@@ -578,7 +602,10 @@ def parse_setting(text: str, old):
         return float(text.strip())
     if isinstance(old, str):
         return text
-    value = json.loads(text)            # lists, objects, null: JSON
+    try:
+        value = json.loads(text)        # lists, objects, null: JSON
+    except RecursionError:
+        raise ValueError("nested too deeply") from None
     if old is not None and type(value) is not type(old):
         raise ValueError("expected " + type(old).__name__)
     return value

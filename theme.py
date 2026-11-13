@@ -6,6 +6,7 @@ reloads them when the theme changes (a file monitor in the app)."""
 from __future__ import annotations
 
 import os
+import stat
 import tomllib
 from pathlib import Path
 
@@ -23,11 +24,14 @@ def read_colors(path: Path = COLORS_TOML) -> dict:
     """The theme's colours, the defaults for any it doesn't name or can't be read."""
     colors = dict(DEFAULTS)
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK)    # a FIFO must not block
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            raise OSError("not a regular file")
         with os.fdopen(fd, "rb") as handle:
             data = handle.read(MAX_THEME_BYTES + 1)
         theme = tomllib.loads(data.decode("utf-8", "replace")) if len(data) <= MAX_THEME_BYTES else {}
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         theme = {}
     for key in colors:
         value = theme.get(key)

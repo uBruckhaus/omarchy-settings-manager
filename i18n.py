@@ -37,7 +37,7 @@ def language_setting():
     try:
         with open(SETTINGS_FILE, "rb") as fh:
             data = json.loads(fh.read(64 * 1024) or b"{}")
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return "auto"
     value = data.get("language") if isinstance(data, dict) else None
     return value if value in CODES else "auto"
@@ -52,7 +52,7 @@ def save_language(code):
         with open(path, "rb") as fh:
             data = json.loads(fh.read(64 * 1024) or b"{}")
         data = data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         data = {}
     if code == "auto":
         data.pop("language", None)
@@ -148,7 +148,7 @@ def _load_tables() -> dict:
         try:
             with open(TRANSLATIONS / f"{code}.json", "rb") as handle:
                 data = json.loads(handle.read(MAX_TABLE + 1)[:MAX_TABLE])
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             continue
         if isinstance(data, dict):
             tables[code] = {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, (str, list))}

@@ -3,7 +3,7 @@
 Manage your installed Omarchy shell plugins in one window, laid out like a settings app
 (a sidebar of pages left, the page right; modelled on Maprisma Settings).
 
-Version 0.3.1 · plugin id `ubruckhaus.settings-manager` · MIT
+Version 0.3.2 · plugin id `ubruckhaus.settings-manager` · MIT
 
 ## Install
 

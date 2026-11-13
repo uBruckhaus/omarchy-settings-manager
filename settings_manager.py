@@ -46,7 +46,7 @@ import theme  # noqa: E402
 from i18n import N_, _, ngettext  # noqa: E402
 
 APP_ID = "org.omarchy.settingsmanager"
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 CONFIG_DIR = Path.home() / ".config/omarchy/settings-manager"
 SETTINGS_FILE = CONFIG_DIR / "settings.json"
 i18n.SETTINGS_FILE = SETTINGS_FILE
@@ -457,6 +457,10 @@ class SettingsManager(Adw.Application):
         if first and self.settings["check_updates"]:
             self.check_updates(fetch=True)
         return False
+
+    def shown(self, sections) -> dict:
+        """The given bar sections as the window shows them (what a change is checked against)."""
+        return {name: self.data["layout"].get(name, []) for name in sections}
 
     def plugin(self, pid: str) -> dict | None:
         return next((p for p in self.data["plugins"] if p["id"] == pid), None)
@@ -932,7 +936,7 @@ class SettingsManager(Adw.Application):
 
     def setting_row(self, plugin: dict, section: str, index: int, key: str, value) -> Gtk.Widget:
         def save(new):
-            self.job(_("Saving {0}…").format(key), lambda: core.set_setting(plugin["id"], key, new, section, index),
+            self.job(_("Saving {0}…").format(key), lambda: core.set_setting(plugin["id"], key, new, section, index, self.shown([section])),
                      _("Saved. The widget uses it at once."))
 
         title = GLib.markup_escape_text(key)            # names come from shell.json: plain text
@@ -1001,7 +1005,8 @@ class SettingsManager(Adw.Application):
         """position counts the target section's entries without the moved one, as the shell's
         moveBarWidget index does (it takes the entry out first, then inserts it there)."""
         self.bar_selected = pid
-        self.job(_("Moving…"), lambda: core.move(pid, from_section, from_index, section, position))
+        expected = self.shown([from_section, section])
+        self.job(_("Moving…"), lambda: core.move(pid, from_section, from_index, section, position, expected))
 
     # --- Bar page ------------------------------------------------------------------------------
 
@@ -1108,7 +1113,8 @@ class SettingsManager(Adw.Application):
             if index is None:
                 return True
             self.bar_selected = pid
-            self.job(_("Moving…"), lambda: core.move(pid, from_section, from_index, section, index))
+            expected = self.shown([from_section, section])
+            self.job(_("Moving…"), lambda: core.move(pid, from_section, from_index, section, index, expected))
             return True
         target.connect("drop", dropped)
         widget.add_controller(target)
