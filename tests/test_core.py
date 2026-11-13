@@ -7,7 +7,6 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import marketplace  # noqa: E402
 import plugins_core as core  # noqa: E402
 
 CONFIG = {"bar": {"layout": {
@@ -94,8 +93,6 @@ class CommandsTest(unittest.TestCase):
             self.assertFalse(core.set_setting("a.b", "id", 1, "left", 0).ok)
             self.assertFalse(core.set_setting("a.b", "bad key", 1, "left", 0).ok)
             self.assertFalse(core.remove(core.OWN_ID, core.OWN_ID, True).ok)
-            self.assertFalse(core.add("https://evil.example/x.git").ok)
-            self.assertFalse(core.add("http://github.com/a/b").ok)
             run.assert_not_called()
 
     def test_ipc_error_text_is_a_failure(self):
@@ -227,36 +224,6 @@ class RoundOneTest(unittest.TestCase):
             core.git_facts(Path(tmp))
         self.assertFalse(any("status" in c[0][0] for c in run.call_args_list))
 
-    def test_cache_dir_must_be_private(self):
-        import os as _os
-        with tempfile.TemporaryDirectory() as tmp:
-            shared = Path(tmp) / "settings-manager"
-            shared.mkdir()
-            _os.chmod(shared, 0o777)
-            with mock.patch.object(marketplace, "CACHE_DIR", shared), mock.patch.object(marketplace, "CACHE_FILE", shared / "c.json"):
-                with self.assertRaises(PermissionError):
-                    marketplace.private_cache_dir()
-                self.assertIsNone(marketplace.cached())
-            link = Path(tmp) / "link"
-            link.symlink_to(Path(tmp))
-            with mock.patch.object(marketplace, "CACHE_DIR", link):
-                with self.assertRaises(OSError):
-                    marketplace.private_cache_dir()
-
-    def test_download_keeps_no_file(self):
-        with tempfile.TemporaryDirectory() as tmp, \
-                mock.patch.object(marketplace, "CACHE_DIR", Path(tmp) / "c"), \
-                mock.patch.object(marketplace, "CACHE_FILE", Path(tmp) / "c" / "catalog.json"), \
-                mock.patch.object(core, "run", return_value=core.Result(0, json.dumps({"plugins": [
-                    {"id": "a.b", "repo": "https://github.com/a/b", "installAvailable": True}]}))) as run:
-            entries, error = marketplace.download()
-            self.assertEqual([e["id"] for e in entries], ["a.b"])
-            self.assertEqual(sorted(p.name for p in (Path(tmp) / "c").iterdir()), ["catalog.json"])
-        argv = run.call_args[0][0]
-        self.assertIn("--max-redirs", argv)
-        self.assertEqual(argv[argv.index("--output") + 1], "-")
-
-
 class RoundTwoTest(unittest.TestCase):
     def test_deeply_nested_json_is_invalid_not_a_crash(self):
         deep = "[" * 200_000 + "]" * 200_000
@@ -266,7 +233,6 @@ class RoundTwoTest(unittest.TestCase):
             self.assertIsNone(core.read_json_file(path, 1024 * 1024))
         with mock.patch.object(core, "run", return_value=core.Result(0, deep)):
             self.assertIsNone(core.shell_plugins())
-            self.assertEqual(marketplace.download()[0], None)
         with self.assertRaises(ValueError):
             core.parse_setting(deep, [])
 
@@ -340,25 +306,7 @@ class RoundFourTest(unittest.TestCase):
                 i18n.SETTINGS_FILE = old
                 i18n._lang = None
 
-    def test_catalog_budgets(self):
-        many = json.dumps({"plugins": [{} for _ in range(marketplace.MAX_OBJECTS + 1)]})
-        with mock.patch.object(core, "run", return_value=core.Result(0, many)):
-            entries, error = marketplace.download()
-        self.assertIsNone(entries)
-        self.assertIn("larger", error)
-        items = [{"id": f"a.p{i}", "repo": f"https://github.com/a/p{i}", "installAvailable": True}
-                 for i in range(marketplace.MAX_ENTRIES + 50)]
-        self.assertEqual(len(marketplace.slim({"plugins": items})), marketplace.MAX_ENTRIES)
-
-
 class RoundFiveTest(unittest.TestCase):
-    def test_many_small_arrays_are_refused_before_parsing(self):
-        arrays = json.dumps({"plugins": [], "x": [[] for _ in range(marketplace.MAX_OBJECTS + 1)]})
-        with mock.patch.object(core, "run", return_value=core.Result(0, arrays)), \
-                mock.patch.object(marketplace.json, "loads", side_effect=AssertionError("parsed")):
-            entries, error = marketplace.download()
-        self.assertIsNone(entries)
-
     def test_private_writes_refuse_unsafe_folders(self):
         import os as _os
         with tempfile.TemporaryDirectory() as tmp:
@@ -379,21 +327,6 @@ class RoundFiveTest(unittest.TestCase):
 
 
 class RoundSixTest(unittest.TestCase):
-    def test_cached_entries_are_checked_again(self):
-        good = {"id": "a.b", "name": "B", "description": "", "author": "", "version": "", "category": "", "kind": "",
-                "repo": "https://github.com/a/b", "stars": 1, "verified": False, "official": False, "updated": ""}
-        bad = [dict(good, id="../x"), dict(good, repo="https://evil.example/x"), dict(good, verified="yes"),
-               dict(good, extra=1), "text", dict(good, stars=-1)]
-        with tempfile.TemporaryDirectory() as tmp:
-            folder = Path(tmp) / "c"
-            with mock.patch.object(marketplace, "CACHE_DIR", folder), mock.patch.object(marketplace, "CACHE_FILE", folder / "catalog.json"):
-                core.write_private_json(folder / "catalog.json", [good, *bad])
-                self.assertEqual(marketplace.cached(), [good])
-                (folder / "catalog.json").unlink()
-                (folder / "catalog.json").symlink_to(Path(tmp) / "elsewhere.json")
-                (Path(tmp) / "elsewhere.json").write_text(json.dumps([good]))
-                self.assertIsNone(marketplace.cached())
-
     def test_incoming_log_has_a_display_budget(self):
         long = "\n".join(f"abc{i} " + "x" * 5000 for i in range(30))
         with mock.patch.object(core, "run", return_value=core.Result(0, long)) as run:
@@ -401,31 +334,6 @@ class RoundSixTest(unittest.TestCase):
         self.assertLessEqual(len(text), core.MAX_LOG + 2)
         self.assertTrue(all(len(line) <= core.MAX_LOG_LINE for line in text.splitlines()))
         self.assertEqual(run.call_args.kwargs["max_bytes"], 64 * 1024)
-
-
-class MarketplaceTest(unittest.TestCase):
-    def test_slim_keeps_installable_github_entries(self):
-        catalog = {"plugins": [
-            {"id": "a.ok", "name": "OK", "repo": "https://github.com/a/ok", "installAvailable": True, "stars": 5,
-             "verificationStatus": "verified", "description": "line\nbreak"},
-            {"id": "a.top", "name": "Top", "repo": "https://github.com/a/top.git", "installAvailable": True, "stars": 50},
-            {"id": "a.manual", "repo": "https://github.com/a/m", "installAvailable": False},
-            {"id": "a.elsewhere", "repo": "https://gitlab.com/a/x", "installAvailable": True},
-            {"id": "../bad", "repo": "https://github.com/a/b", "installAvailable": True},
-            {"id": "a.ok", "repo": "https://github.com/a/dupe", "installAvailable": True},
-        ]}
-        entries = marketplace.slim(catalog)
-        self.assertEqual([e["id"] for e in entries], ["a.top", "a.ok"])
-        self.assertEqual(entries[0]["repo"], "https://github.com/a/top")
-        self.assertTrue(entries[1]["verified"])
-        self.assertEqual(entries[1]["description"], "line break")
-        self.assertEqual(marketplace.slim(None), [])
-
-    def test_matches_all_words(self):
-        entry = {"name": "WLAN Monitor", "id": "x.wlan", "author": "Uwe", "description": "Wi-Fi devices", "category": "System"}
-        self.assertTrue(marketplace.matches(entry, "wlan uwe"))
-        self.assertFalse(marketplace.matches(entry, "wlan bluetooth"))
-        self.assertTrue(marketplace.matches(entry, " "))
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 #!/bin/sh
 # Start Settings Manager (or bring its window to the front): settings-manager [--page <page>]
 # --toggle (the bar icon): close it when it is the window in front.
-# Pages: plugins, bar, updates, get, settings. Started as an app of its own under uwsm where there is one.
+# Pages: plugins, bar, updates, settings. Started as an app of its own under uwsm where there is one.
 here=$(dirname "$(readlink -f "$0")")
 if command -v uwsm >/dev/null 2>&1; then
   exec uwsm app -- python3 "$here/settings_manager.py" "$@"

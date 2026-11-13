@@ -3,11 +3,11 @@
 Manage your installed Omarchy shell plugins in one window, laid out like a settings app
 (a sidebar of pages left, the page right; modelled on Maprisma Settings).
 
-Version 0.3.6 · plugin id `ubruckhaus.settings-manager` · MIT
+Version 0.4.0 · plugin id `ubruckhaus.settings-manager` · MIT
 
 ## Install
 
-From the marketplace, or:
+With Omarchy's plugin command:
 
 ```bash
 omarchy plugin add https://github.com/uBruckhaus/omarchy-settings-manager.git --enable
@@ -23,7 +23,7 @@ omarchy plugin remove ubruckhaus.settings-manager
 ```
 
 Its own files outside the plugin folder, deleted by hand if you want them gone:
-`~/.config/omarchy/settings-manager/` (its settings), `~/.cache/settings-manager/` (the catalog copy) and
+`~/.config/omarchy/settings-manager/` (its settings) and
 `~/Pictures/Settings Manager/` (F12 screenshots, only if you took any).
 
 ## Pages
@@ -39,8 +39,6 @@ Its own files outside the plugin folder, deleted by hand if you want them gone:
   section or onto an area of the bar preview (it goes to its end); or use ← / →, "Move to", take out.
 - **Updates**: the plugins whose git checkout is behind its remote, with the commits an update brings;
   Update or Update all. Plugins without a git remote are listed as "update by hand".
-- **Get plugins**: the Omarchy Plugin Marketplace catalog (installable plugins, most stars first),
-  search, Install.
 - **Settings**: language (8 built in), update check on opening, Omarchy's own plugins in the list,
   Corners (like the windows, slightly rounded, rounded, square), F12 screenshot key; About.
 
@@ -64,44 +62,33 @@ Every change goes through Omarchy's own plugin commands and the shell's IPC; the
 | Change a setting | `omarchy-shell shell setBarWidget <id> <key> <json> {section, index}` |
 | Update | `omarchy-plugin-update <folder> --yes` (fast-forward only, validated, rolled back on failure) |
 | Remove | `omarchy-plugin-remove <folder> --yes` (a git checkout is deleted, a link unlinked, anything else moved to a backup) |
-| Install | `omarchy-plugin-add <https://github.com/…> --yes`, then `omarchy-plugin-enable` |
 
 The update check runs `git fetch origin HEAD` in each plugin checkout (as `omarchy plugin update` does)
 and counts the new commits; nothing is merged until you press Update.
 
-The marketplace catalog (`site/catalog.json`, about 17 MB) is downloaded over https when the Get plugins page needs it and no copy younger than a day exists
-with curl and kept as a slim copy in `~/.cache/settings-manager/catalog.json`. Only installable
-entries with an https GitHub repository are shown. Plugins run code on your computer; the marketplace's
-checks are not a security audit.
-
 All commands run with an argument list (no shell), a timeout and an output cap; one that hangs is ended
-with its process group. Text from manifests and the catalog is cleaned before it is shown.
+with its process group. Text from manifests is cleaned before it is shown.
 
 ## Network and capabilities
 
-- **Network:** the Get plugins page downloads the marketplace catalog from
-  `raw.githubusercontent.com/omacom/omarchy-plugin-marketplace` (https only, no redirects, 40 MB and
-  90 s caps, read straight into memory; a copy younger than a day is used instead,
-  and the reload button fetches it again). The update check
-  runs `git fetch` against each plugin checkout's `origin`, only when that is an https URL (you can turn
-  the check off in Settings). Beyond that, the network is only used by what you start yourself: Install,
-  Update (Omarchy's `git clone` / `git pull`) and the GitHub or marketplace links, which open in your
-  browser.
-- **Installing, updating and removing plugins** is only done when you press the button and, for install
-  and remove, confirm a dialog. It runs Omarchy's own `omarchy-plugin-add`, `-update` and `-remove`
-  (argv, never a shell); install accepts only `https://github.com/<owner>/<repo>` URLs from the catalog.
-  Settings Manager refuses to remove itself.
+- **Network:** the update check runs `git fetch` against each plugin checkout's `origin`, only when that
+  is an https URL (you can turn the check off in Settings). Beyond that, the network is only used by
+  what you start yourself: Update (Omarchy's `git pull`) and the GitHub or marketplace links, which open
+  in your browser. Settings Manager does not install plugins.
+- **Updating and removing plugins** is only done when you press the button and, for remove, confirm a
+  dialog. It runs Omarchy's own `omarchy-plugin-update` and `-remove` (argv, never a shell). Settings
+  Manager refuses to remove itself.
 - **Your files:** `shell.json` is changed only through the shell's IPC, and only by your actions (move,
   put in, take out, a setting you edit). Right before a move or a setting change the running shell's
   layout is read again; if the sections involved differ from what the window showed, or the shell doesn't
   answer, nothing is changed. The shell itself also refuses when the entry at that place is not the named
   widget. (Omarchy's IPC has no compare-and-set, so a change by another tool in the milliseconds between
-  that check and the call could still meet a second copy of the same widget.) Its own settings and cache are written atomically (random-named
+  that check and the call could still meet a second copy of the same widget.) Its own settings are written atomically (random-named
   temp file, 0600, rename) and only into a folder that is its own: not a link, owned by you, not
   writable by others (made 0700).
 - **Shell restart:** after an update a "Restart the shell" button runs `omarchy restart shell` when you
   press it.
-- **Untrusted text:** plugin manifests, catalog entries and `shell.json` keys are shown as plain text
+- **Untrusted text:** plugin manifests, commit subjects and `shell.json` keys are shown as plain text
   (control characters removed, markup escaped). Text fields read the clipboard only through `wl-paste`
   with a 16 KiB cap and a 2 s deadline, accept no text drops from other apps, and the Bar page's drop targets accept a drop only
   when GTK reports it as a drag from this window (`Gdk.Drop.get_drag()`), so text dragged in from other
@@ -114,7 +101,6 @@ with its process group. Text from manifests and the catalog is cleaned before it
 - `settings_manager.py`: the GTK 4 / libadwaita window (Python 3, PyGObject, both part of Omarchy)
 - `plugins_core.py`: plugin list, bar layout, git facts and the commands (standard library only;
   `python3 plugins_core.py list`)
-- `marketplace.py`: the catalog download and cache
 - `theme.py`: colours from the current Omarchy theme, followed live; `corners.py`: the Corners setting
 - `screenshot.py`: the F12 key
 - `i18n.py`, `translations/`: interface languages

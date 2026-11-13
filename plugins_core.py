@@ -624,24 +624,6 @@ def remove(plugin_id: str, folder_name: str, enabled: bool) -> Result:
     return run(["omarchy-plugin-remove", folder_name, "--yes"], timeout=60)
 
 
-def add(repo_url: str, plugin_id: str = "", section: str = "") -> Result:
-    """`omarchy plugin add <url> --yes`, then put it in the bar (its manifest's section, or the
-    one given). Only https GitHub repositories are accepted."""
-    if not GITHUB_RE.match(repo_url or ""):
-        return Result(None, "", "only https://github.com/<owner>/<repo> can be added")
-    result = run(["omarchy-plugin-add", repo_url, "--yes"], timeout=300)
-    if not result.ok:
-        return result
-    shell_call("rescanPlugins")
-    if plugin_id and valid_id(plugin_id):
-        for _attempt in range(10):           # the shell scans manifests in a subprocess
-            placed = put_in_bar(plugin_id, section)
-            if placed.ok:
-                return Result(0, result.out + "\n" + placed.out, result.err)
-            time.sleep(0.5)
-    return result
-
-
 def open_plugin(plugin_id: str) -> Result:
     """Open a panel plugin's panel (`omarchy-shell shell toggle <id>`)."""
     if not valid_id(plugin_id):

@@ -10,12 +10,11 @@ shell plugins instead of the Maprisma apps:
   the bar and the settings stored in its bar entry (shell.json), editable.
 - Bar: the bar's sections in order, the built-in widgets included, with ← / → and "Move to".
 - Updates: the git checkouts with new commits upstream, what they bring, Update / Update all.
-- Get plugins: the marketplace catalog, installable plugins, Install.
 - Settings: language, update check on opening, Omarchy's own plugins in the list; About.
 
 Every change goes through Omarchy's own commands (plugins_core). A normal app window: started
 again, it comes to the front; `--toggle` (the bar icon) closes it when it is in front;
-`--page <plugins|bar|updates|get|settings>` opens a page, `--plugin <id>` a plugin's details.
+`--page <plugins|bar|updates|settings>` opens a page, `--plugin <id>` a plugin's details.
 """
 
 from __future__ import annotations
@@ -39,14 +38,13 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
 import corners  # noqa: E402
 import i18n  # noqa: E402
-import marketplace  # noqa: E402
 import plugins_core as core  # noqa: E402
 import screenshot  # noqa: E402
 import theme  # noqa: E402
 from i18n import N_, _, ngettext  # noqa: E402
 
 APP_ID = "org.omarchy.settingsmanager"
-VERSION = "0.3.6"
+VERSION = "0.4.0"
 CONFIG_DIR = Path.home() / ".config/omarchy/settings-manager"
 SETTINGS_FILE = CONFIG_DIR / "settings.json"
 i18n.SETTINGS_FILE = SETTINGS_FILE
@@ -54,7 +52,6 @@ i18n.SETTINGS_FILE = SETTINGS_FILE
 PAGES = (("plugins", N_("Plugins"), "application-x-addon-symbolic"),
          ("bar", N_("Bar"), "view-grid-symbolic"),
          ("updates", N_("Updates"), "software-update-available-symbolic"),
-         ("get", N_("Get plugins"), "system-software-install-symbolic"),
          ("settings", N_("Settings"), "preferences-system-symbolic"))
 SECTION_NAMES = {"left": N_("Left"), "centerBegin": N_("Before the centre"), "center": N_("Centre (clock box)"),
                  "centerEnd": N_("After the centre"), "tray": N_("Tray"), "right": N_("Right")}
@@ -62,7 +59,7 @@ KIND_NAMES = {"bar": N_("Bar"), "bar-widget": N_("Bar widget"), "panel": N_("Pan
               "service": N_("Service"), "menu": N_("Menu"), "plugin": N_("Plugin")}
 WINDOW_SIZE = (1080, 780)
 FRONT_GRACE = 1.0
-MAX_SHOWN = 120            # Get plugins: rows shown at once (the catalog has thousands)
+LISTING_URL = "https://plugins.omarchy.org/plugin.html?id={}"
 FETCH_WORKERS = 4
 
 
@@ -212,9 +209,6 @@ class SettingsManager(Adw.Application):
         self.behind: dict = {}             # id → new commits upstream (None: couldn't check)
         self.incoming: dict = {}           # id → commit subjects an update brings
         self.checking = False
-        self.catalog: list = []
-        self.catalog_error = ""
-        self.catalog_loading = False
         self.busy = False
         self.detail_id = ""
         self.bar_selected = ""             # Bar page: the chip/row picked last ("section:index")
@@ -319,7 +313,6 @@ class SettingsManager(Adw.Application):
         self.build_detail_page()
         self.build_bar_page()
         self.build_updates_page()
-        self.build_get_page()
         self.build_settings_page()
 
         Gtk.Settings.get_default().set_property("gtk-enable-primary-paste", False)
@@ -356,15 +349,12 @@ class SettingsManager(Adw.Application):
         if keyval == Gdk.KEY_BackSpace and not typing and self.current_page() == "detail":
             self.go_back()
             return True
-        if ctrl and Gdk.KEY_1 <= keyval <= Gdk.KEY_5:
+        if ctrl and Gdk.KEY_1 <= keyval < Gdk.KEY_1 + len(PAGES):
             self.show_page(PAGES[keyval - Gdk.KEY_1][0])
             return True
         if ctrl and keyval in (Gdk.KEY_f, Gdk.KEY_F):
-            page = self.current_page()
-            target = self.get_search if page == "get" else self.plugin_search
-            if page not in ("get",):
-                self.show_page("plugins")
-            target.grab_focus()
+            self.show_page("plugins")
+            self.plugin_search.grab_focus()
             return True
         if ctrl and keyval in (Gdk.KEY_r, Gdk.KEY_R) or keyval == Gdk.KEY_F5:
             self.reload()
@@ -386,8 +376,6 @@ class SettingsManager(Adw.Application):
             row = self.sidebar_rows.get(key)
             if row is not None and self.sidebar.get_selected_row() is not row:
                 self.sidebar.select_row(row)
-        if key == "get" and not self.catalog and not self.catalog_loading:
-            self.load_catalog()
 
     def on_sidebar(self, _box, row):
         if row is not None and row.page != self.current_page():
@@ -484,8 +472,6 @@ class SettingsManager(Adw.Application):
         self.fill_updates()
         if self.current_page() == "detail":
             self.fill_detail()
-        if self.catalog:
-            self.fill_get()
 
     def guard(self, widget: Gtk.Widget):
         guard_text_fields(widget, self)
@@ -666,7 +652,7 @@ class SettingsManager(Adw.Application):
             item(_("Open its folder"), lambda: self.open_folder(plugin["folder"]))
         if plugin.get("repoUrl"):
             item(_("GitHub page"), lambda: self.open_uri(plugin["repoUrl"]))
-            item(_("Marketplace page"), lambda: self.open_uri(marketplace.LISTING_URL.format(plugin["id"])))
+            item(_("Marketplace page"), lambda: self.open_uri(LISTING_URL.format(plugin["id"])))
         if plugin["installed"] and plugin["id"] != core.OWN_ID:
             item(_("Remove…"), lambda: self.act_remove(plugin), ("error",))
         popover.set_child(box)
@@ -704,7 +690,7 @@ class SettingsManager(Adw.Application):
         if not shown:
             status = Adw.StatusPage(icon_name="application-x-addon-symbolic",
                                     title=_("No plugin matches") if query else _("No plugins installed"),
-                                    description="" if query else _("Get some on the “Get plugins” page."))
+                                    description="")
             self.plugin_groups.append(status)
             return
         for key, title in groups:
@@ -1128,101 +1114,6 @@ class SettingsManager(Adw.Application):
         target.connect("drop", dropped)
         widget.add_controller(target)
 
-    # --- Get plugins page ----------------------------------------------------------------------
-
-    def build_get_page(self):
-        box = page_box()
-        top = Gtk.Box(spacing=8)
-        self.get_search = Gtk.SearchEntry(placeholder_text=_("Search the marketplace (Ctrl+F)"), hexpand=True)
-        self.get_search.connect("search-changed", lambda *_: self.fill_get())
-        top.append(self.get_search)
-        self.get_refresh = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text=_("Load the catalog again"))
-        self.get_refresh.connect("clicked", lambda *_: self.load_catalog(force=True))
-        top.append(self.get_refresh)
-        box.append(top)
-        self.get_status = label("", ("sm-dim",), wrap=True)
-        box.append(self.get_status)
-        self.get_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        box.append(self.get_list)
-        box.append(label(_("Plugins come from the Omarchy Plugin Marketplace and run code on your computer. "
-                           "The marketplace's checks are not a security audit: install what you trust."),
-                         ("sm-dim",), wrap=True))
-        self.stack.add_named(scrolled(box), "get")
-
-    def load_catalog(self, force: bool = False):
-        if self.catalog_loading:
-            return
-        self.catalog_loading = True
-        self.get_refresh.set_sensitive(False)
-        self.get_status.set_text(_("Loading the marketplace catalog…"))
-
-        def work():
-            entries, error = marketplace.load(force=force)
-            GLib.idle_add(done, entries, error)
-
-        def done(entries, error):
-            self.catalog_loading = False
-            self.get_refresh.set_sensitive(True)
-            self.catalog, self.catalog_error = entries or [], error
-            self.fill_get()
-            return False
-
-        threading.Thread(target=work, daemon=True).start()
-
-    def fill_get(self):
-        clear(self.get_list)
-        query = self.get_search.get_text()
-        found = [e for e in self.catalog if marketplace.matches(e, query)]
-        installed = {p["id"] for p in self.data["plugins"] if p["installed"]}
-        if self.catalog_error and not self.catalog:
-            self.get_status.set_text(_("The catalog couldn't be loaded: {0}").format(self.catalog_error))
-            return
-        status = ngettext("{0} installable plugin", "{0} installable plugins", len(found)).format(len(found))
-        if len(found) > MAX_SHOWN:
-            status += " · " + _("showing the {0} with the most stars; type to narrow it down").format(MAX_SHOWN)
-        if self.catalog_error:
-            status += " · " + _("(an older copy: {0})").format(self.catalog_error)
-        self.get_status.set_text(status)
-        group = Adw.PreferencesGroup()
-        for entry in found[:MAX_SHOWN]:
-            parts = [p for p in (entry["author"], entry["category"], entry["kind"], entry["version"]) if p]
-            if entry["stars"]:
-                parts.append(f"★ {entry['stars']}")
-            if entry["verified"]:
-                parts.append(_("verified"))
-            row = Adw.ExpanderRow(title=GLib.markup_escape_text(entry["name"]),
-                                  subtitle=GLib.markup_escape_text(" · ".join(parts)))
-            if entry["id"] in installed:
-                row.add_suffix(label(_("Installed"), ("sm-ok",)))
-            else:
-                button = Gtk.Button(label=_("Install"), valign=Gtk.Align.CENTER, css_classes=["suggested-action"])
-                button.connect("clicked", lambda _b, e=entry: self.act_install(e))
-                row.add_suffix(button)
-            text = label(entry["description"] or _("(no description)"), wrap=True)
-            for side in ("top", "start", "end"):
-                getattr(text, f"set_margin_{side}")(10)
-            row.add_row(text)
-            links = Gtk.Box(spacing=6)
-            for side in ("bottom", "start", "end"):
-                getattr(links, f"set_margin_{side}")(10)
-            for title, uri in ((_("GitHub page"), entry["repo"]), (_("Marketplace page"), marketplace.LISTING_URL.format(entry["id"]))):
-                link = Gtk.Button(label=title, css_classes=["flat"])
-                link.connect("clicked", lambda _b, u=uri: self.open_uri(u))
-                links.append(link)
-            row.add_row(links)
-            group.add(row)
-        self.get_list.append(group)
-
-    def act_install(self, entry: dict):
-        body = _("From {0}\n\nIt is cloned into ~/.config/omarchy/plugins with `omarchy plugin add` and put "
-                 "into the bar where its author suggests. Plugins run code on your computer.").format(entry["repo"])
-        if not entry["verified"]:
-            body += "\n\n" + _("This plugin is not verified by the marketplace.")
-        self.confirm(_("Install {0}?").format(entry["name"]), body, _("Install"),
-                     lambda: self.job(_("Installing {0}…").format(entry["name"]),
-                                      lambda: core.add(entry["repo"], entry["id"]),
-                                      _("{0} is installed.").format(entry["name"])))
-
     # --- Settings page -------------------------------------------------------------------------
 
     def build_settings_page(self):
@@ -1265,8 +1156,8 @@ class SettingsManager(Adw.Application):
         about = Adw.PreferencesGroup(title=_("About"))
         about.add(Adw.ActionRow(title=_("Settings Manager {0}").format(VERSION),
                                 subtitle=_("Manage the installed Omarchy plugins: bar places, settings, updates, "
-                                           "removal and new plugins from the marketplace.")))
-        keys = Adw.ActionRow(title=_("Keys"), subtitle=_("Ctrl+1…5 pages · Ctrl+F filter · F5 reload · "
+                                           "removal.")))
+        keys = Adw.ActionRow(title=_("Keys"), subtitle=_("Ctrl+1…4 pages · Ctrl+F filter · F5 reload · "
                                                           "Backspace back · Esc back or close · F12 screenshot"))
         about.add(keys)
         folder = Adw.ActionRow(title=_("Folder"), subtitle=GLib.markup_escape_text(str(HERE)), activatable=True)
