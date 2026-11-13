@@ -50,6 +50,16 @@ class LayoutTest(unittest.TestCase):
         self.assertIsNone(core.move_step(layout, "omarchy.tray", "right", 1, 1))
 
 
+class DropTest(unittest.TestCase):
+    def test_drop_index(self):
+        self.assertIsNone(core.drop_index("left", 2, "left", 2))           # on itself
+        self.assertIsNone(core.drop_index("left", 2, "left", 3))           # before its neighbour: same place
+        self.assertEqual(core.drop_index("left", 2, "left", 0), 0)
+        self.assertEqual(core.drop_index("left", 0, "left", 3), 2)         # one less: it was taken out first
+        self.assertEqual(core.drop_index("left", 0, "left", 5), 4)         # at the end of a 5-entry section
+        self.assertEqual(core.drop_index("left", 0, "right", 3), 3)
+
+
 class ValuesTest(unittest.TestCase):
     def test_parse_setting_keeps_the_type(self):
         self.assertIs(core.parse_setting("yes", False), True)

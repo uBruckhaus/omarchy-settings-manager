@@ -1,0 +1,79 @@
+"""The "Corners" setting, shared with App Manager, Theme Manager and AI Playground.
+
+"windows" (the default) follows the windows' rounding (Hyprland's decoration:rounding);
+"slight", "rounded" and "square" ignore it. No process is started here."""
+import json
+import os
+import re
+
+CHOICES = ("windows", "slight", "rounded", "square")
+SLIGHT = 6        # "Slightly rounded": round controls beside square or tiled windows.
+ROUNDED = 12      # "Rounded": Theme Manager's corners up to now.
+MAX_RADIUS = 24
+MAX_LUA_BYTES = 256 * 1024
+# `rounding = 8` outside a comment; "gradient_rounding" and "rounding_power" don't count.
+_ROUNDING = re.compile(r"(?<![\w.])rounding\s*=\s*(\d+)")
+
+
+def choice(value):
+    return value if value in CHOICES else "windows"
+
+
+def parse_rounding(text):
+    """The window rounding from Hyprland's `getoption decoration:rounding` JSON, or None."""
+    try:
+        value = json.loads(text).get("int")
+    except (ValueError, TypeError, AttributeError):
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return max(0, min(value, MAX_RADIUS))
+
+
+def radius(setting, window_rounding):
+    """The corner radius in px for this setting and the windows' rounding."""
+    setting = choice(setting)
+    if setting == "slight":
+        return SLIGHT
+    if setting == "rounded":
+        return ROUNDED
+    if setting == "square":
+        return 0
+    return window_rounding if window_rounding is not None else 0
+
+
+def lua_rounding(path):
+    """The last uncommented `rounding = N` in a Lua config file, or None."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        return None
+    try:
+        with os.fdopen(fd, "rb") as handle:
+            data = handle.read(MAX_LUA_BYTES + 1)
+    except OSError:
+        return None
+    if len(data) > MAX_LUA_BYTES:
+        return None
+    found = None
+    for line in data.decode("utf-8", "replace").splitlines():
+        code = line.split("--", 1)[0]
+        for match in _ROUNDING.finditer(code):
+            found = int(match.group(1))
+    return found
+
+
+def rounded_path(cr, x, y, width, height, radius):
+    """A rectangle with corners of `radius` (cairo), for what is drawn rather than styled: the
+    chess board, the automaton grid, colour swatches."""
+    r = max(0.0, min(radius, width / 2, height / 2))
+    if r <= 0:
+        cr.rectangle(x, y, width, height)
+        return
+    from math import pi
+    cr.new_sub_path()
+    cr.arc(x + width - r, y + r, r, -pi / 2, 0)
+    cr.arc(x + width - r, y + height - r, r, 0, pi / 2)
+    cr.arc(x + r, y + height - r, r, pi / 2, pi)
+    cr.arc(x + r, y + r, r, pi, 3 * pi / 2)
+    cr.close_path()

@@ -23,7 +23,6 @@
  "Cloned from": "Clonado de",
  "Close": "Fechar",
  "Couldn't check": "Não foi possível verificar",
- "Ctrl+1…5 pages · Ctrl+F filter · F5 reload · Backspace back · Esc back or close": "Ctrl+1…5 páginas · Ctrl+F filtrar · F5 recarregar · Backspace voltar · Esc voltar ou fechar",
  "Data it keeps elsewhere (settings, caches) stays.": "Os dados guardados noutros locais (definições, caches) mantêm-se.",
  "Details": "Detalhes",
  "Empty": "Vazio",
@@ -57,7 +56,6 @@
  "Manage the installed Omarchy plugins: bar places, settings, updates, removal and new plugins from the marketplace.": "Gerir os plugins Omarchy instalados: posições na barra, definições, atualizações, remoção e novos plugins do marketplace.",
  "Marketplace page": "Página do marketplace",
  "Menu": "Menu",
- "Move a widget here with its ⋮ menu.": "Mova um widget para aqui com o menu ⋮.",
  "Move to": "Mover para",
  "Move to: {0}": "Mover para: {0}",
  "Moving…": "A mover…",
@@ -162,5 +160,24 @@
  "\u0004{0} plugin has an update.": [
   "{0} plugin tem uma atualização.",
   "{0} plugins têm atualizações."
- ]
+ ],
+ "Corners": "Cantos",
+ "F12 saves a screenshot": "F12 guarda uma captura de ecrã",
+ "Square": "Retos",
+ "Slightly rounded ({0} px)": "Levemente arredondados ({0} px)",
+ "Rounded ({0} px)": "Arredondados ({0} px)",
+ "Done": "Concluído",
+ "Screenshot saved": "Captura guardada",
+ "What is wrong? (optional)": "O que está mal? (opcional)",
+ "The window drew nothing.": "A janela não desenhou nada.",
+ "Saved as {0}": "Guardada como {0}",
+ "The screenshot could not be saved: {0}": "Não foi possível guardar a captura: {0}",
+ "The note could not be saved: {0}": "Não foi possível guardar a nota: {0}",
+ "Like the windows": "Como as janelas",
+ "Like the windows ({0} px)": "Como as janelas ({0} px)",
+ "How round the cards, buttons and fields are.": "O arredondamento de cartões, botões e campos.",
+ "A picture of this window in ~/Pictures/Settings Manager, with an optional note.": "Uma imagem desta janela em ~/Pictures/Settings Manager, com uma nota opcional.",
+ "Ctrl+1…5 pages · Ctrl+F filter · F5 reload · Backspace back · Esc back or close · F12 screenshot": "Ctrl+1…5 páginas · Ctrl+F filtro · F5 recarregar · Backspace voltar · Esc voltar ou fechar · F12 captura",
+ "Drag a widget here, or use its ⋮ menu.": "Arraste um widget para aqui ou use o menu ⋮.",
+ "Drag to move it along the bar": "Arrastar para o mover na barra"
 }

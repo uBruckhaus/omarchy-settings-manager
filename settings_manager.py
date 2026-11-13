@@ -37,14 +37,16 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
+import corners  # noqa: E402
 import i18n  # noqa: E402
 import marketplace  # noqa: E402
 import plugins_core as core  # noqa: E402
+import screenshot  # noqa: E402
 import theme  # noqa: E402
 from i18n import N_, _, ngettext  # noqa: E402
 
 APP_ID = "org.omarchy.settingsmanager"
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 CONFIG_DIR = Path.home() / ".config/omarchy/settings-manager"
 SETTINGS_FILE = CONFIG_DIR / "settings.json"
 i18n.SETTINGS_FILE = SETTINGS_FILE
@@ -70,7 +72,9 @@ def load_settings() -> dict:
     data = core.read_json_file(SETTINGS_FILE, 64 * 1024)
     data = data if isinstance(data, dict) else {}
     return {"check_updates": data.get("check_updates", True) is not False,
-            "show_builtin": data.get("show_builtin") is True}
+            "show_builtin": data.get("show_builtin") is True,
+            "corners": corners.choice(data.get("corners")),
+            "screenshot_key": data.get("screenshot_key", True) is not False}
 
 
 def save_setting(key: str, value) -> None:
@@ -164,6 +168,7 @@ class SettingsManager(Adw.Application):
         self.left_front = 0.0
         self.provider = None
         self.reload_pending = False
+        self.window_rounding = None        # Hyprland's decoration:rounding, read once at start
 
     # --- start ---------------------------------------------------------------------------------
 
@@ -206,6 +211,8 @@ class SettingsManager(Adw.Application):
         window.set_default_size(*WINDOW_SIZE)
         window.connect("notify::is-active", self.on_active)
         self.window = window
+        result = core.run(["hyprctl", "getoption", "decoration:rounding", "-j"], timeout=2)
+        self.window_rounding = corners.parse_rounding(result.out) if result.ok else None
         self.apply_theme()
         self.watch_files()
 
@@ -286,6 +293,11 @@ class SettingsManager(Adw.Application):
             else:
                 self.window.close()
             return True
+        if keyval == Gdk.KEY_F12 and not state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.ALT_MASK):
+            if self.settings["screenshot_key"]:
+                screenshot.take(self)
+                return True
+            return False
         if keyval == Gdk.KEY_BackSpace and not typing and self.current_page() == "detail":
             self.go_back()
             return True
@@ -336,7 +348,8 @@ class SettingsManager(Adw.Application):
         Adw.StyleManager.get_default().set_color_scheme(
             Adw.ColorScheme.FORCE_LIGHT if theme.is_light(colors["background"]) else Adw.ColorScheme.FORCE_DARK)
         provider = Gtk.CssProvider()
-        provider.load_from_string(theme.css(colors))
+        radius = corners.radius(self.settings["corners"], self.window_rounding)
+        provider.load_from_string(theme.css(colors, radius))
         display = Gdk.Display.get_default()
         if self.provider is not None:
             Gtk.StyleContext.remove_provider_for_display(display, self.provider)
@@ -961,6 +974,8 @@ class SettingsManager(Adw.Application):
                 zone.append(chip)
             if not layout.get(section):
                 zone.append(label("·", ("sm-dim",)))
+            # A widget dropped on an area of the preview goes to that area's end.
+            self.drop_target(zone, section, len(layout.get(section, [])))
             self.bar_strip.append(zone)
             if section in ("left", "centerEnd", "tray"):
                 spacer = Gtk.Box(hexpand=section != "tray")
@@ -971,12 +986,19 @@ class SettingsManager(Adw.Application):
             group = Adw.PreferencesGroup(title=_(SECTION_NAMES[section]),
                                          description=ngettext("{0} widget", "{0} widgets", len(entries)).format(len(entries)))
             if not entries:
-                group.add(Adw.ActionRow(title=_("Empty"), subtitle=_("Move a widget here with its ⋮ menu.")))
+                empty = Adw.ActionRow(title=_("Empty"), subtitle=_("Drag a widget here, or use its ⋮ menu."))
+                self.drop_target(empty, section, 0)
+                group.add(empty)
             for position, entry in enumerate(entries):
                 name, mine, plugin = self.widget_name(entry["id"])
                 sub = entry["id"] if mine or plugin is None else _("Omarchy") + " · " + entry["id"]
                 row = Adw.ActionRow(title=f"{position + 1}. " + GLib.markup_escape_text(name),
                                     subtitle=GLib.markup_escape_text(sub), activatable=plugin is not None)
+                handle = Gtk.Image(icon_name="list-drag-handle-symbolic", css_classes=["sm-dim"],
+                                   tooltip_text=_("Drag to move it along the bar"))
+                row.add_prefix(handle)
+                self.drag_source(row, entry["id"], section, position, entry["index"])
+                self.drop_target(row, section, position)
                 if plugin is not None:
                     row.connect("activated", lambda _r, pid=entry["id"]: self.open_detail(pid))
                 row.add_suffix(self.move_buttons(entry["id"], section, entry["index"]))
@@ -987,6 +1009,45 @@ class SettingsManager(Adw.Application):
                     row.add_suffix(out)
                 group.add(row)
             self.bar_groups.append(group)
+
+    def drag_source(self, row: Gtk.Widget, pid: str, section: str, position: int, index: int):
+        """A bar row can be dragged; what travels is "id section position index" (all checked again
+        on the drop against the layout as it is then)."""
+        source = Gtk.DragSource(actions=Gdk.DragAction.MOVE)
+        source.connect("prepare", lambda *_: Gdk.ContentProvider.new_for_value(f"{pid} {section} {position} {index}"))
+
+        def begin(src, _drag):
+            src.set_icon(Gtk.WidgetPaintable.new(row), 20, 20)
+            row.add_css_class("sm-dragging")
+        source.connect("drag-begin", begin)
+        source.connect("drag-end", lambda *_: row.remove_css_class("sm-dragging"))
+        row.add_controller(source)
+
+    def drop_target(self, widget: Gtk.Widget, section: str, position: int):
+        """Dropping a bar row here puts it before this row (or at the end of an area)."""
+        target = Gtk.DropTarget.new(str, Gdk.DragAction.MOVE)
+        target.connect("enter", lambda *_: (widget.add_css_class("sm-drop"), Gdk.DragAction.MOVE)[1])
+        target.connect("leave", lambda *_: widget.remove_css_class("sm-drop"))
+
+        def dropped(_target, value, _x, _y):
+            widget.remove_css_class("sm-drop")
+            parts = str(value).split(" ")
+            if len(parts) != 4 or not core.valid_id(parts[0]) or parts[1] not in core.SECTIONS \
+                    or not parts[2].isdigit() or not parts[3].isdigit():
+                return False
+            pid, from_section, from_position, from_index = parts[0], parts[1], int(parts[2]), int(parts[3])
+            entries = self.data["layout"].get(from_section, [])
+            # The layout may have changed since the drag began (another tool): then nothing moves.
+            if from_position >= len(entries) or entries[from_position]["id"] != pid or entries[from_position]["index"] != from_index:
+                return False
+            index = core.drop_index(from_section, from_position, section, position)
+            if index is None:
+                return True
+            self.bar_selected = pid
+            self.job(_("Moving…"), lambda: core.move(pid, from_section, from_index, section, index))
+            return True
+        target.connect("drop", dropped)
+        widget.add_controller(target)
 
     # --- Get plugins page ----------------------------------------------------------------------
 
@@ -1106,6 +1167,20 @@ class SettingsManager(Adw.Application):
                                 active=self.settings["show_builtin"])
         builtin.connect("notify::active", lambda r, _p: (self.set_setting("show_builtin", r.get_active()), self.fill_plugins()))
         group.add(builtin)
+        like = (_("Like the windows ({0} px)").format(self.window_rounding) if self.window_rounding is not None
+                else _("Like the windows"))
+        corner_row = Adw.ComboRow(title=_("Corners"), subtitle=_("How round the cards, buttons and fields are."),
+                                  model=Gtk.StringList.new([like, _("Slightly rounded ({0} px)").format(corners.SLIGHT),
+                                                            _("Rounded ({0} px)").format(corners.ROUNDED), _("Square")]))
+        corner_row.set_selected(corners.CHOICES.index(self.settings["corners"]))
+        corner_row.connect("notify::selected", lambda r, _p: (self.set_setting("corners", corners.CHOICES[r.get_selected()]),
+                                                              self.apply_theme()))
+        group.add(corner_row)
+        shot = Adw.SwitchRow(title=_("F12 saves a screenshot"),
+                             subtitle=_("A picture of this window in ~/Pictures/Settings Manager, with an optional note."),
+                             active=self.settings["screenshot_key"])
+        shot.connect("notify::active", lambda r, _p: self.set_setting("screenshot_key", r.get_active()))
+        group.add(shot)
         box.append(group)
 
         about = Adw.PreferencesGroup(title=_("About"))
@@ -1113,7 +1188,7 @@ class SettingsManager(Adw.Application):
                                 subtitle=_("Manage the installed Omarchy plugins: bar places, settings, updates, "
                                            "removal and new plugins from the marketplace.")))
         keys = Adw.ActionRow(title=_("Keys"), subtitle=_("Ctrl+1…5 pages · Ctrl+F filter · F5 reload · "
-                                                          "Backspace back · Esc back or close"))
+                                                          "Backspace back · Esc back or close · F12 screenshot"))
         about.add(keys)
         folder = Adw.ActionRow(title=_("Folder"), subtitle=GLib.markup_escape_text(str(HERE)), activatable=True)
         folder.connect("activated", lambda *_: self.open_folder(str(HERE)))

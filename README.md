@@ -3,7 +3,7 @@
 Manage your installed Omarchy shell plugins in one window, laid out like a settings app
 (a sidebar of pages left, the page right; modelled on Maprisma Settings).
 
-Version 0.1.0 · plugin id `ubruckhaus.settings-manager` · MIT
+Version 0.2.0 · plugin id `ubruckhaus.settings-manager` · MIT
 
 ## Pages
 
@@ -14,15 +14,18 @@ Version 0.1.0 · plugin id `ubruckhaus.settings-manager` · MIT
   with ← / → or "Move to"), and the settings stored in its bar entry in `shell.json`, editable (switches,
   numbers, text; lists and objects as JSON).
 - **Bar**: the bar as it is now, left to right, Omarchy's own widgets included, each section with its
-  widgets in order; move, take out, open details.
+  widgets in order. Drag a row by its handle onto another row (it goes before that one), onto an empty
+  section or onto an area of the bar preview (it goes to its end); or use ← / →, "Move to", take out.
 - **Updates**: the plugins whose git checkout is behind its remote, with the commits an update brings;
   Update or Update all. Plugins without a git remote are listed as "update by hand".
 - **Get plugins**: the Omarchy Plugin Marketplace catalog (installable plugins, most stars first),
   search, Install.
-- **Settings**: language (8 built in), update check on opening, Omarchy's own plugins in the list; About.
+- **Settings**: language (8 built in), update check on opening, Omarchy's own plugins in the list,
+  Corners (like the windows, slightly rounded, rounded, square), F12 screenshot key; About.
 
 Keys: Ctrl+1…5 pages · Ctrl+F filter · F5 / Ctrl+R reload · Backspace back from details · Esc back,
-then close.
+then close · F12 a screenshot of the window into `~/Pictures/Settings Manager/` (private folder, never
+over an older file) with an optional note beside it.
 
 The bar icon opens or closes the window; right-click opens the Updates page. From a terminal:
 `settings-manager [--page plugins|bar|updates|get|settings] [--plugin <id>]`.
@@ -59,7 +62,8 @@ with its process group. Text from manifests and the catalog is cleaned before it
 - `plugins_core.py`: plugin list, bar layout, git facts and the commands (standard library only;
   `python3 plugins_core.py list`)
 - `marketplace.py`: the catalog download and cache
-- `theme.py`: colours from the current Omarchy theme, followed live
+- `theme.py`: colours from the current Omarchy theme, followed live; `corners.py`: the Corners setting
+- `screenshot.py`: the F12 key
 - `i18n.py`, `translations/`: interface languages
 - Settings: `~/.config/omarchy/settings-manager/settings.json`
 

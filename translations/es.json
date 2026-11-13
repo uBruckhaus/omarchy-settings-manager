@@ -23,7 +23,6 @@
  "Cloned from": "Clonado de",
  "Close": "Cerrar",
  "Couldn't check": "No se pudo comprobar",
- "Ctrl+1…5 pages · Ctrl+F filter · F5 reload · Backspace back · Esc back or close": "Ctrl+1…5 páginas · Ctrl+F filtrar · F5 recargar · Backspace atrás · Esc atrás o cerrar",
  "Data it keeps elsewhere (settings, caches) stays.": "Los datos que guarda en otros sitios (ajustes, cachés) se conservan.",
  "Details": "Detalles",
  "Empty": "Vacío",
@@ -57,7 +56,6 @@
  "Manage the installed Omarchy plugins: bar places, settings, updates, removal and new plugins from the marketplace.": "Gestiona los plugins de Omarchy instalados: posiciones en la barra, ajustes, actualizaciones, eliminación y nuevos plugins del marketplace.",
  "Marketplace page": "Página del marketplace",
  "Menu": "Menú",
- "Move a widget here with its ⋮ menu.": "Mueve aquí un widget con su menú ⋮.",
  "Move to": "Mover a",
  "Move to: {0}": "Mover a: {0}",
  "Moving…": "Moviendo…",
@@ -162,5 +160,24 @@
  "\u0004{0} plugin has an update.": [
   "{0} plugin tiene una actualización.",
   "{0} plugins tienen actualizaciones."
- ]
+ ],
+ "Corners": "Esquinas",
+ "F12 saves a screenshot": "F12 guarda una captura de pantalla",
+ "Square": "Rectas",
+ "Slightly rounded ({0} px)": "Ligeramente redondeadas ({0} px)",
+ "Rounded ({0} px)": "Redondeadas ({0} px)",
+ "Done": "Hecho",
+ "Screenshot saved": "Captura guardada",
+ "What is wrong? (optional)": "¿Qué falla? (opcional)",
+ "The window drew nothing.": "La ventana no dibujó nada.",
+ "Saved as {0}": "Guardada como {0}",
+ "The screenshot could not be saved: {0}": "No se pudo guardar la captura: {0}",
+ "The note could not be saved: {0}": "No se pudo guardar la nota: {0}",
+ "Like the windows": "Como las ventanas",
+ "Like the windows ({0} px)": "Como las ventanas ({0} px)",
+ "How round the cards, buttons and fields are.": "Lo redondeadas que son las tarjetas, botones y campos.",
+ "A picture of this window in ~/Pictures/Settings Manager, with an optional note.": "Una imagen de esta ventana en ~/Pictures/Settings Manager, con una nota opcional.",
+ "Ctrl+1…5 pages · Ctrl+F filter · F5 reload · Backspace back · Esc back or close · F12 screenshot": "Ctrl+1…5 páginas · Ctrl+F filtro · F5 recargar · Backspace atrás · Esc atrás o cerrar · F12 captura",
+ "Drag a widget here, or use its ⋮ menu.": "Arrastra un widget aquí o usa su menú ⋮.",
+ "Drag to move it along the bar": "Arrastrar para moverlo en la barra"
 }

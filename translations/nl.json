@@ -23,7 +23,6 @@
  "Cloned from": "Gekloond van",
  "Close": "Sluiten",
  "Couldn't check": "Controle mislukt",
- "Ctrl+1…5 pages · Ctrl+F filter · F5 reload · Backspace back · Esc back or close": "Ctrl+1…5 pagina's · Ctrl+F filteren · F5 herladen · Backspace terug · Esc terug of sluiten",
  "Data it keeps elsewhere (settings, caches) stays.": "Gegevens die elders staan (instellingen, caches) blijven bewaard.",
  "Details": "Details",
  "Empty": "Leeg",
@@ -57,7 +56,6 @@
  "Manage the installed Omarchy plugins: bar places, settings, updates, removal and new plugins from the marketplace.": "Beheer de geïnstalleerde Omarchy-plugins: plaatsen in de balk, instellingen, updates, verwijderen en nieuwe plugins uit de marketplace.",
  "Marketplace page": "Marketplace-pagina",
  "Menu": "Menu",
- "Move a widget here with its ⋮ menu.": "Verplaats een widget hierheen via het ⋮-menu.",
  "Move to": "Verplaatsen naar",
  "Move to: {0}": "Verplaatsen naar: {0}",
  "Moving…": "Verplaatsen…",
@@ -162,5 +160,24 @@
  "\u0004{0} plugin has an update.": [
   "{0} plugin heeft een update.",
   "{0} plugins hebben updates."
- ]
+ ],
+ "Corners": "Hoeken",
+ "F12 saves a screenshot": "F12 bewaart een schermafbeelding",
+ "Square": "Hoekig",
+ "Slightly rounded ({0} px)": "Licht afgerond ({0} px)",
+ "Rounded ({0} px)": "Afgerond ({0} px)",
+ "Done": "Klaar",
+ "Screenshot saved": "Schermafbeelding bewaard",
+ "What is wrong? (optional)": "Wat is er mis? (optioneel)",
+ "The window drew nothing.": "Het venster tekende niets.",
+ "Saved as {0}": "Bewaard als {0}",
+ "The screenshot could not be saved: {0}": "De schermafbeelding kon niet worden bewaard: {0}",
+ "The note could not be saved: {0}": "De notitie kon niet worden bewaard: {0}",
+ "Like the windows": "Zoals de vensters",
+ "Like the windows ({0} px)": "Zoals de vensters ({0} px)",
+ "How round the cards, buttons and fields are.": "Hoe rond kaarten, knoppen en velden zijn.",
+ "A picture of this window in ~/Pictures/Settings Manager, with an optional note.": "Een afbeelding van dit venster in ~/Pictures/Settings Manager, met een optionele notitie.",
+ "Ctrl+1…5 pages · Ctrl+F filter · F5 reload · Backspace back · Esc back or close · F12 screenshot": "Ctrl+1…5 pagina's · Ctrl+F filter · F5 herladen · Backspace terug · Esc terug of sluiten · F12 schermafbeelding",
+ "Drag a widget here, or use its ⋮ menu.": "Sleep een widget hierheen of gebruik het ⋮-menu.",
+ "Drag to move it along the bar": "Slepen om het in de balk te verplaatsen"
 }

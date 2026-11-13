@@ -382,6 +382,17 @@ def move_step(layout: dict, plugin_id: str, section: str, index: int, step: int)
     return None
 
 
+def drop_index(from_section: str, from_position: int, section: str, position: int) -> int | None:
+    """Drag and drop: the shell's index for "put it before the widget at `position`" (position =
+    the section's length: at its end). The shell takes the entry out first, so a drop further along
+    its own section counts one less. None: dropped on itself or just behind itself (no move)."""
+    if section == from_section:
+        if position in (from_position, from_position + 1):
+            return None
+        return position - 1 if position > from_position else position
+    return position
+
+
 def set_setting(plugin_id: str, key: str, value, section: str, index: int) -> Result:
     """Change one key of a bar entry (`setBarWidget`); the entry is named by section and index."""
     if not valid_id(plugin_id) or not SETTING_KEY_RE.match(key or "") or key == "id" or section not in SECTIONS:
