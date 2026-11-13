@@ -240,7 +240,7 @@ class RoundOneTest(unittest.TestCase):
             link = Path(tmp) / "link"
             link.symlink_to(Path(tmp))
             with mock.patch.object(marketplace, "CACHE_DIR", link):
-                with self.assertRaises(PermissionError):
+                with self.assertRaises(OSError):
                     marketplace.private_cache_dir()
 
     def test_download_keeps_no_file(self):
@@ -349,6 +349,33 @@ class RoundFourTest(unittest.TestCase):
         items = [{"id": f"a.p{i}", "repo": f"https://github.com/a/p{i}", "installAvailable": True}
                  for i in range(marketplace.MAX_ENTRIES + 50)]
         self.assertEqual(len(marketplace.slim({"plugins": items})), marketplace.MAX_ENTRIES)
+
+
+class RoundFiveTest(unittest.TestCase):
+    def test_many_small_arrays_are_refused_before_parsing(self):
+        arrays = json.dumps({"plugins": [], "x": [[] for _ in range(marketplace.MAX_OBJECTS + 1)]})
+        with mock.patch.object(core, "run", return_value=core.Result(0, arrays)), \
+                mock.patch.object(marketplace.json, "loads", side_effect=AssertionError("parsed")):
+            entries, error = marketplace.download()
+        self.assertIsNone(entries)
+
+    def test_private_writes_refuse_unsafe_folders(self):
+        import os as _os
+        with tempfile.TemporaryDirectory() as tmp:
+            shared = Path(tmp) / "shared"
+            shared.mkdir()
+            _os.chmod(shared, 0o777)
+            with self.assertRaises(PermissionError):
+                core.write_private_json(shared / "settings.json", {})
+            real = Path(tmp) / "real"
+            real.mkdir(mode=0o700)
+            link = Path(tmp) / "link"
+            link.symlink_to(real)
+            with self.assertRaises(OSError):
+                core.write_private_json(link / "settings.json", {})
+            self.assertEqual(list(real.iterdir()), [])
+            core.write_private_json(real / "settings.json", {"a": 1})
+            self.assertEqual([p.name for p in real.iterdir()], ["settings.json"])
 
 
 class MarketplaceTest(unittest.TestCase):

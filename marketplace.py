@@ -82,8 +82,8 @@ def download() -> tuple:
                                "--output", "-", "--", CATALOG_URL], timeout=100, max_bytes=MAX_DOWNLOAD)
     if not result.ok:
         return None, result.err.strip() or "download failed"
-    # Many tiny objects inflate far beyond the byte size when parsed: count them first.
-    if result.out.count("{") > MAX_OBJECTS:
+    # Many tiny objects or arrays inflate far beyond the byte size when parsed: count them first.
+    if result.out.count("{") + result.out.count("[") > MAX_OBJECTS:
         return None, "the catalog is larger than expected"
     try:
         data = json.loads(result.out)
@@ -101,15 +101,8 @@ def download() -> tuple:
 
 
 def private_cache_dir() -> None:
-    """The cache folder: made 0700 when missing; refused when it is a link, not ours, or open to others."""
-    CACHE_DIR.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        os.mkdir(CACHE_DIR, 0o700)
-    except FileExistsError:
-        pass
-    info = os.lstat(CACHE_DIR)
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
-        raise PermissionError(f"{CACHE_DIR} is not a private folder of yours")
+    """The cache folder must be a private folder of the user's (see plugins_core.private_dir_fd)."""
+    os.close(plugins_core.private_dir_fd(CACHE_DIR))
 
 
 def load(force: bool = False) -> tuple:

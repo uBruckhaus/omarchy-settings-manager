@@ -518,24 +518,59 @@ def set_setting(plugin_id: str, key: str, value, section: str, index: int, expec
     return _ipc_result(shell_call("setBarWidget", plugin_id, key, json.dumps(value), json.dumps(selector)))
 
 
-def write_private_json(path: Path, data) -> None:
-    """Write JSON atomically and privately: a fresh unique temp file (never a predictable name,
-    never through a link), 0600, fsync, then rename over the old file; no temp file is left behind."""
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+def private_dir_fd(folder: Path) -> int:
+    """A handle on our own folder: made 0700 when missing; only a real folder (not a link) owned by
+    this user and not writable by others is used. The caller closes the handle."""
+    folder.parent.mkdir(parents=True, exist_ok=True)
     try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(data, handle, indent=1, ensure_ascii=False)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-    except BaseException:
+        os.mkdir(folder, 0o700)
+    except FileExistsError:
+        pass
+    fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    info = os.fstat(fd)
+    if info.st_uid != os.getuid() or info.st_mode & 0o022:
+        os.close(fd)
+        raise PermissionError(f"{folder} is not a private folder of yours")
+    return fd
+
+
+def write_private_json(path: Path, data) -> None:
+    """Write JSON atomically and privately, entirely relative to a verified folder handle: a fresh
+    temp file with a random name (O_EXCL, never through a link), 0600, fsync, then a rename over the
+    old file inside the same folder; no temp file is left behind."""
+    text = json.dumps(data, indent=1, ensure_ascii=False).encode("utf-8")
+    dfd = private_dir_fd(path.parent)
+    try:
+        for _attempt in range(20):
+            tmp = f".{path.name}.{os.urandom(6).hex()}.tmp"
+            try:
+                fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=dfd)
+                break
+            except FileExistsError:
+                continue
+        else:
+            raise OSError("no free temporary name")
         try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+            view = memoryview(text)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    raise OSError("write failed")
+                view = view[written:]
+            os.fsync(fd)
+            os.close(fd)
+            fd = -1
+            os.replace(tmp, path.name, src_dir_fd=dfd, dst_dir_fd=dfd)
+        except BaseException:
+            if fd >= 0:
+                os.close(fd)
+            try:
+                os.unlink(tmp, dir_fd=dfd)
+            except OSError:
+                pass
+            raise
+    finally:
+        os.close(dfd)
 
 
 MAX_PASTE = 16 * 1024
