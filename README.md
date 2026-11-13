@@ -3,7 +3,7 @@
 Manage your installed Omarchy shell plugins in one window, laid out like a settings app
 (a sidebar of pages left, the page right; modelled on Maprisma Settings).
 
-Version 0.3.2 · plugin id `ubruckhaus.settings-manager` · MIT
+Version 0.3.3 · plugin id `ubruckhaus.settings-manager` · MIT
 
 ## Install
 
@@ -91,7 +91,11 @@ with its process group. Text from manifests and the catalog is cleaned before it
   (argv, never a shell); install accepts only `https://github.com/<owner>/<repo>` URLs from the catalog.
   Settings Manager refuses to remove itself.
 - **Your files:** `shell.json` is changed only through the shell's IPC, and only by your actions (move,
-  put in, take out, a setting you edit). Its own settings and cache are written atomically through private
+  put in, take out, a setting you edit). Right before a move or a setting change the running shell's
+  layout is read again; if the sections involved differ from what the window showed, or the shell doesn't
+  answer, nothing is changed. The shell itself also refuses when the entry at that place is not the named
+  widget. (Omarchy's IPC has no compare-and-set, so a change by another tool in the milliseconds between
+  that check and the call could still meet a second copy of the same widget.) Its own settings and cache are written atomically through private
   temp files (0600).
 - **Shell restart:** after an update a "Restart the shell" button runs `omarchy restart shell` when you
   press it.

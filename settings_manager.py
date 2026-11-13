@@ -46,7 +46,7 @@ import theme  # noqa: E402
 from i18n import N_, _, ngettext  # noqa: E402
 
 APP_ID = "org.omarchy.settingsmanager"
-VERSION = "0.3.2"
+VERSION = "0.3.3"
 CONFIG_DIR = Path.home() / ".config/omarchy/settings-manager"
 SETTINGS_FILE = CONFIG_DIR / "settings.json"
 i18n.SETTINGS_FILE = SETTINGS_FILE
@@ -97,6 +97,14 @@ def parse_args(argv: list) -> dict:
     if wanted["page"] not in {p for p, _n, _i in PAGES}:
         wanted["page"] = ""
     return wanted
+
+
+def day(stamp: int) -> str:
+    """A commit time as a date; "" for an unknown or impossible one."""
+    try:
+        return time.strftime("%Y-%m-%d", time.localtime(stamp)) if stamp else ""
+    except (OverflowError, ValueError, OSError):
+        return ""
 
 
 def where_text(plugin: dict) -> str:
@@ -922,7 +930,7 @@ class SettingsManager(Adw.Application):
         fact(_("Folder"), plugin["folder"] + (" → " + str(Path(plugin["folder"]).resolve()) if plugin["link"] else ""))
         if plugin.get("git"):
             fact(_("Git"), " · ".join(p for p in (plugin.get("branch"), plugin.get("commit"),
-                                                 time.strftime("%Y-%m-%d", time.localtime(plugin["committed"])) if plugin.get("committed") else "",
+                                                 day(plugin.get("committed", 0)),
                                                  _("local changes") if plugin.get("dirty") else "") if p))
             fact(_("Remote"), plugin.get("remote"))
         if plugin["clonedFrom"]:
@@ -936,7 +944,8 @@ class SettingsManager(Adw.Application):
 
     def setting_row(self, plugin: dict, section: str, index: int, key: str, value) -> Gtk.Widget:
         def save(new):
-            self.job(_("Saving {0}…").format(key), lambda: core.set_setting(plugin["id"], key, new, section, index, self.shown([section])),
+            expected = self.shown([section])          # what the user saw when acting, not when the job runs
+            self.job(_("Saving {0}…").format(key), lambda: core.set_setting(plugin["id"], key, new, section, index, expected),
                      _("Saved. The widget uses it at once."))
 
         title = GLib.markup_escape_text(key)            # names come from shell.json: plain text

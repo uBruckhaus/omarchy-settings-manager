@@ -273,13 +273,13 @@ class RoundTwoTest(unittest.TestCase):
     def test_changed_layout_is_not_acted_on(self):
         shown = {"left": [{"id": "a.b", "index": 0, "settings": {}}]}
         now = {"bar": {"layout": {"left": [{"id": "x.y"}, {"id": "a.b"}]}}}
-        with mock.patch.object(core, "shell_config", return_value=now), \
+        with mock.patch.object(core, "live_shell_config", return_value=now), \
                 mock.patch.object(core, "shell_call") as call:
             self.assertFalse(core.move("a.b", "left", 0, "right", 0, shown).ok)
             self.assertFalse(core.set_setting("a.b", "k", 1, "left", 0, shown).ok)
             call.assert_not_called()
         same = {"bar": {"layout": {"left": [{"id": "a.b"}]}}}
-        with mock.patch.object(core, "shell_config", return_value=same), \
+        with mock.patch.object(core, "live_shell_config", return_value=same), \
                 mock.patch.object(core, "shell_call", return_value=core.Result(0, "ok")) as call:
             self.assertTrue(core.move("a.b", "left", 0, "right", 0, shown).ok)
             call.assert_called_once()
@@ -293,6 +293,26 @@ class RoundTwoTest(unittest.TestCase):
             start = _t.monotonic()
             self.assertEqual(theme.read_colors(fifo), theme.DEFAULTS)
             self.assertLess(_t.monotonic() - start, 1)
+
+
+class RoundThreeTest(unittest.TestCase):
+    def test_no_shell_answer_means_no_change(self):
+        shown = {"left": [{"id": "a.b", "index": 0, "settings": {}}]}
+        with mock.patch.object(core, "shell_call", return_value=core.Result(1, "", "no shell")) as call, \
+                mock.patch.object(core, "read_json_file", return_value={"bar": {"layout": {"left": [{"id": "a.b"}]}}}):
+            result = core.move("a.b", "left", 0, "right", 0, shown)
+        self.assertFalse(result.ok)
+        self.assertIn("doesn't answer", result.err)
+        self.assertEqual([c[0][0] for c in call.call_args_list], ["listShellConfig"])
+
+    def test_extreme_commit_time_is_dropped(self):
+        def fake(argv, **_kw):
+            if "log" in argv:
+                return core.Result(0, "99999999999999999999\n")
+            return core.Result(0, "")
+        with mock.patch.object(core, "run", side_effect=fake), tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / ".git").mkdir()
+            self.assertEqual(core.git_facts(Path(tmp))["committed"], 0)
 
 
 class MarketplaceTest(unittest.TestCase):

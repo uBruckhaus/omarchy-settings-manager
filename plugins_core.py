@@ -198,6 +198,19 @@ def shell_plugins() -> list | None:
     return [p for p in data if isinstance(p, dict) and valid_id(p.get("id"))] if isinstance(data, list) else None
 
 
+def live_shell_config() -> dict | None:
+    """The running shell's effective config, or None when the shell doesn't answer (no file
+    fallback: a change is only checked against what the shell really has)."""
+    result = shell_call("listShellConfig")
+    if not result.ok:
+        return None
+    try:
+        data = json.loads(result.out)
+    except (ValueError, RecursionError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def shell_config() -> dict:
     """The shell's effective shell.json (IPC), else the file itself."""
     result = shell_call("listShellConfig")
@@ -276,7 +289,9 @@ def git_facts(folder: Path) -> dict:
     changed = run([*GIT, "-C", str(folder), "diff-files", "--name-only"], timeout=10)
     facts["dirty"] = staged.code == 1 or bool(changed.ok and changed.out.strip())
     when = run([*GIT, "-C", str(folder), "log", "-1", "--format=%ct"], timeout=5)
-    facts["committed"] = int(when.out.strip()) if when.ok and when.out.strip().isdigit() else 0
+    stamp = when.out.strip()
+    # A commit's time is data from the repository: only a sane range is kept (0: unknown).
+    facts["committed"] = int(stamp) if when.ok and stamp.isdigit() and len(stamp) <= 11 and int(stamp) < 2**33 else 0
     return facts
 
 
@@ -421,9 +436,12 @@ def take_out(plugin_id: str) -> Result:
     return run(["omarchy-plugin-disable", plugin_id], timeout=20)
 
 
-def sections_now(sections) -> dict:
-    """The named sections of the bar as the shell has them right now."""
-    layout = bar_layout(shell_config())
+def sections_now(sections) -> dict | None:
+    """The named sections of the bar as the running shell has them right now (None: no answer)."""
+    config = live_shell_config()
+    if config is None:
+        return None
+    layout = bar_layout(config)
     return {name: layout.get(name, []) for name in sections}
 
 
@@ -433,7 +451,10 @@ def check_unchanged(expected: dict | None) -> Result | None:
     None: unchanged (or nothing to compare); else a failed Result."""
     if not expected:
         return None
-    if sections_now(expected) != expected:
+    now = sections_now(expected)
+    if now is None:
+        return Result(1, "", "the Omarchy shell doesn't answer, so the bar can't be checked; nothing was changed")
+    if now != expected:
         return Result(1, "", "the bar changed meanwhile; look again and retry")
     return None
 
