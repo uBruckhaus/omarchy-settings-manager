@@ -315,6 +315,42 @@ class RoundThreeTest(unittest.TestCase):
             self.assertEqual(core.git_facts(Path(tmp))["committed"], 0)
 
 
+class RoundFourTest(unittest.TestCase):
+    def test_language_setting_survives_bad_files(self):
+        import os as _os, time as _t
+        import i18n
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            old = i18n.SETTINGS_FILE
+            try:
+                i18n.SETTINGS_FILE = path
+                for bad in ('{"language": []}', '{"language": {}}', '[1]', "[" * 100000):
+                    path.write_text(bad)
+                    self.assertEqual(i18n.language_setting(), "auto")
+                path.unlink()
+                _os.mkfifo(path)
+                start = _t.monotonic()
+                self.assertEqual(i18n.language_setting(), "auto")
+                self.assertLess(_t.monotonic() - start, 1)
+                path.unlink()
+                i18n.save_language("de")
+                self.assertEqual(json.loads(path.read_text()), {"language": "de"})
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            finally:
+                i18n.SETTINGS_FILE = old
+                i18n._lang = None
+
+    def test_catalog_budgets(self):
+        many = json.dumps({"plugins": [{} for _ in range(marketplace.MAX_OBJECTS + 1)]})
+        with mock.patch.object(core, "run", return_value=core.Result(0, many)):
+            entries, error = marketplace.download()
+        self.assertIsNone(entries)
+        self.assertIn("larger", error)
+        items = [{"id": f"a.p{i}", "repo": f"https://github.com/a/p{i}", "installAvailable": True}
+                 for i in range(marketplace.MAX_ENTRIES + 50)]
+        self.assertEqual(len(marketplace.slim({"plugins": items})), marketplace.MAX_ENTRIES)
+
+
 class MarketplaceTest(unittest.TestCase):
     def test_slim_keeps_installable_github_entries(self):
         catalog = {"plugins": [

@@ -21,7 +21,10 @@ CATALOG_URL = "https://raw.githubusercontent.com/omacom/omarchy-plugin-marketpla
 LISTING_URL = "https://plugins.omarchy.org/plugin.html?id={}"
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "settings-manager"
 CACHE_FILE = CACHE_DIR / "catalog.json"
-MAX_DOWNLOAD = 64 * 1024 * 1024
+MAX_DOWNLOAD = 40 * 1024 * 1024        # the real catalog is about 17 MB
+MAX_OBJECTS = 500_000                   # JSON objects in it (about 60 000 today), checked before parsing
+MAX_SCANNED = 60_000                    # catalog entries looked at
+MAX_ENTRIES = 20_000                    # installable entries kept
 MAX_CACHE = 16 * 1024 * 1024
 MAX_AGE = 24 * 3600
 INSTALL_RE = r"omarchy plugin add "
@@ -31,7 +34,9 @@ def slim(catalog) -> list:
     """The installable entries, with only what the page shows; untrusted text cleaned."""
     items = catalog.get("plugins") if isinstance(catalog, dict) else None
     out, seen = [], set()
-    for item in items if isinstance(items, list) else []:
+    for item in (items[:MAX_SCANNED] if isinstance(items, list) else []):
+        if len(out) >= MAX_ENTRIES:
+            break
         if not isinstance(item, dict) or item.get("installAvailable") is not True:
             continue
         pid, repo = item.get("id"), item.get("repo")
@@ -77,6 +82,9 @@ def download() -> tuple:
                                "--output", "-", "--", CATALOG_URL], timeout=100, max_bytes=MAX_DOWNLOAD)
     if not result.ok:
         return None, result.err.strip() or "download failed"
+    # Many tiny objects inflate far beyond the byte size when parsed: count them first.
+    if result.out.count("{") > MAX_OBJECTS:
+        return None, "the catalog is larger than expected"
     try:
         data = json.loads(result.out)
     except (ValueError, RecursionError):

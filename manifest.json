@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "ubruckhaus.settings-manager",
   "name": "Settings Manager",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "author": "Uwe Bruckhaus",
   "license": "MIT",
   "description": "Manage your installed Omarchy plugins in one window, laid out like a settings app: every plugin grouped by in the bar, running in the background or not in use; put widgets in or out of the bar and move them along it; edit the settings stored in their bar entries; check and install updates of their git checkouts; remove plugins; and find and install new ones from the marketplace catalog. Every change goes through Omarchy's own plugin commands.",

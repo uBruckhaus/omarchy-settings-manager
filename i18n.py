@@ -30,49 +30,33 @@ def system_language():
     return "en"
 
 
+def _read_settings() -> dict:
+    """The settings file through the plugin's safe reader: a regular file only (a FIFO never
+    blocks), size-capped, invalid or nested-too-deep JSON counts as empty."""
+    import plugins_core
+    data = plugins_core.read_json_file(Path(SETTINGS_FILE), 64 * 1024)
+    return data if isinstance(data, dict) else {}
+
+
 def language_setting():
     """'auto' or a language code from the settings file."""
     if SETTINGS_FILE is None:
         return "auto"
-    try:
-        with open(SETTINGS_FILE, "rb") as fh:
-            data = json.loads(fh.read(64 * 1024) or b"{}")
-    except (OSError, ValueError, RecursionError):
-        return "auto"
-    value = data.get("language") if isinstance(data, dict) else None
-    return value if value in CODES else "auto"
+    value = _read_settings().get("language")
+    return value if isinstance(value, str) and value in CODES else "auto"
 
 
 def save_language(code):
     """Store the choice (atomic, private); "auto" follows the system again."""
     if SETTINGS_FILE is None:
         return
-    path = Path(SETTINGS_FILE)
-    try:
-        with open(path, "rb") as fh:
-            data = json.loads(fh.read(64 * 1024) or b"{}")
-        data = data if isinstance(data, dict) else {}
-    except (OSError, ValueError, RecursionError):
-        data = {}
+    import plugins_core
+    data = _read_settings()
     if code == "auto":
         data.pop("language", None)
     elif code in CODES:
         data["language"] = code
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(data, fh, indent=2)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except FileNotFoundError:
-            pass
-        raise
+    plugins_core.write_private_json(Path(SETTINGS_FILE), data)
     global _lang
     _lang = None
 
