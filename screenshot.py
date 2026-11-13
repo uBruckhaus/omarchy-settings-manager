@@ -119,6 +119,7 @@ def take(app) -> None:
                              body=_("Saved as {0}").format(str(path).replace(str(Path.home()), "~", 1)))
     entry = Gtk.Entry(placeholder_text=_("What is wrong? (optional)"), activates_default=True, max_length=NOTE_LIMIT)
     dialog.set_extra_child(entry)
+    app.guard(entry)                                # paste only through the bounded read
     dialog.add_response("done", _("Done"))
     dialog.set_default_response("done")
     dialog.set_close_response("done")

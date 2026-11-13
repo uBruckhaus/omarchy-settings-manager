@@ -8,8 +8,8 @@ window runs `omarchy plugin add` through plugins_core.add().
 
 from __future__ import annotations
 
-import json
 import os
+import tempfile
 import time
 from pathlib import Path
 
@@ -70,9 +70,11 @@ def cached(max_age: float = MAX_AGE) -> list | None:
 def download() -> tuple:
     """Fetch the catalog now: (entries, error text). Keeps the slim copy on success."""
     CACHE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-    raw = CACHE_DIR / f".download.{os.getpid()}"
-    result = plugins_core.run(["curl", "--proto", "=https", "--proto-redir", "=https", "--fail", "--silent",
-                               "--show-error", "--location", "--max-redirs", "3", "--max-time", "90",
+    fd, raw_name = tempfile.mkstemp(dir=CACHE_DIR, prefix=".download.")     # curl writes into our own file
+    os.close(fd)
+    raw = Path(raw_name)
+    result = plugins_core.run(["curl", "--proto", "=https", "--fail", "--silent",
+                               "--show-error", "--max-redirs", "0", "--max-time", "90",
                                "--max-filesize", str(MAX_DOWNLOAD), "--output", str(raw), CATALOG_URL],
                               timeout=100)
     try:
@@ -82,11 +84,7 @@ def download() -> tuple:
         entries = slim(data)
         if not entries:
             return None, "the catalog had no installable plugins"
-        tmp = CACHE_DIR / f".catalog.{os.getpid()}.tmp"
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(entries, handle)
-        os.replace(tmp, CACHE_FILE)
+        plugins_core.write_private_json(CACHE_FILE, entries)
         return entries, ""
     finally:
         try:

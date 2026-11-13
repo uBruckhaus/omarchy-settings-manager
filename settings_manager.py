@@ -46,7 +46,7 @@ import theme  # noqa: E402
 from i18n import N_, _, ngettext  # noqa: E402
 
 APP_ID = "org.omarchy.settingsmanager"
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 CONFIG_DIR = Path.home() / ".config/omarchy/settings-manager"
 SETTINGS_FILE = CONFIG_DIR / "settings.json"
 i18n.SETTINGS_FILE = SETTINGS_FILE
@@ -81,12 +81,7 @@ def save_setting(key: str, value) -> None:
     data = core.read_json_file(SETTINGS_FILE, 64 * 1024)
     data = data if isinstance(data, dict) else {}
     data[key] = value
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-    tmp = SETTINGS_FILE.with_name(f".settings.{os.getpid()}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        json.dump(data, handle, indent=2)
-    os.replace(tmp, SETTINGS_FILE)
+    core.write_private_json(SETTINGS_FILE, data)
 
 
 def parse_args(argv: list) -> dict:
@@ -123,6 +118,56 @@ def label(text: str = "", css: tuple = (), xalign: float = 0.0, wrap: bool = Fal
     if any(name.startswith("sm-pill") for name in css):
         widget.set_valign(Gtk.Align.CENTER)
     return widget
+
+
+def guard_text_fields(root: Gtk.Widget, app) -> None:
+    """Every text field under root takes text from other clients only through a bounded read: GTK's
+    own paste, middle-click paste and text drops buffer a foreign offer with no limit or deadline."""
+    stack = [root]
+    while stack:
+        widget = stack.pop()
+        if isinstance(widget, Gtk.Text):
+            guard_text(widget, app)
+            continue
+        child = widget.get_first_child()
+        while child is not None:
+            stack.append(child)
+            child = child.get_next_sibling()
+
+
+def guard_text(text: Gtk.Text, app) -> None:
+    if getattr(text, "_sm_guarded", False):
+        return
+    text._sm_guarded = True
+    if text.get_max_length() == 0:
+        text.set_max_length(core.MAX_SETTING_TEXT)
+    text.connect("paste-clipboard", lambda t: _paste(t, app))      # Ctrl+V, Shift+Insert, the menu
+    middle = Gtk.GestureClick(button=Gdk.BUTTON_MIDDLE)
+    middle.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+    middle.connect("pressed", lambda gesture, *_: gesture.set_state(Gtk.EventSequenceState.CLAIMED))
+    text.add_controller(middle)
+    controllers = text.observe_controllers()
+    for i in reversed(range(controllers.get_n_items())):
+        controller = controllers.get_item(i)
+        if isinstance(controller, (Gtk.DropTarget, Gtk.DropTargetAsync)):
+            text.remove_controller(controller)
+
+
+def _paste(text: Gtk.Text, app) -> None:
+    text.stop_emission_by_name("paste-clipboard")
+
+    def worker():
+        pasted = core.clipboard_text()
+        GLib.idle_add(insert, pasted)
+
+    def insert(pasted):
+        if pasted is None:
+            app.toast(_("Clipboard text is too long to paste (max {0} KiB)").format(core.MAX_PASTE // 1024))
+        elif pasted:
+            text.delete_selection()
+            text.set_position(text.insert_text(pasted, text.get_position()))
+        return False
+    threading.Thread(target=worker, daemon=True).start()
 
 
 def clear(box: Gtk.Widget) -> None:
@@ -269,6 +314,8 @@ class SettingsManager(Adw.Application):
         self.build_get_page()
         self.build_settings_page()
 
+        Gtk.Settings.get_default().set_property("gtk-enable-primary-paste", False)
+        guard_text_fields(window, self)
         keys = Gtk.EventControllerKey()
         keys.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         keys.connect("key-pressed", self.on_key)
@@ -428,8 +475,18 @@ class SettingsManager(Adw.Application):
         if self.catalog:
             self.fill_get()
 
+    def guard(self, widget: Gtk.Widget):
+        guard_text_fields(widget, self)
+
     def toast(self, text: str):
         toast = Adw.Toast(title=GLib.markup_escape_text(text), timeout=4)
+        self.toasts.add_toast(toast)
+
+    def offer_shell_restart(self, text: str):
+        """After an update: a bar widget's new code only loads with a fresh shell."""
+        toast = Adw.Toast(title=GLib.markup_escape_text(text), timeout=10, button_label=_("Restart the shell"))
+        toast.connect("button-clicked", lambda *_: threading.Thread(
+            target=core.run, args=(["omarchy", "restart", "shell"],), kwargs={"timeout": 30}, daemon=True).start())
         self.toasts.add_toast(toast)
 
     # --- jobs ----------------------------------------------------------------------------------
@@ -509,8 +566,8 @@ class SettingsManager(Adw.Application):
             if result.ok:
                 self.behind[plugin["id"]] = 0
                 self.incoming.pop(plugin["id"], None)
-        self.job(_("Updating {0}…").format(plugin["name"]), lambda: core.update(plugin["folderName"]),
-                 _("{0} is updated. Restart the shell if its bar widget doesn't change.").format(plugin["name"]), after)
+                self.offer_shell_restart(_("{0} is updated. Its bar widget changes after a shell restart.").format(plugin["name"]))
+        self.job(_("Updating {0}…").format(plugin["name"]), lambda: core.update(plugin["folderName"]), "", after)
 
     def act_update_all(self):
         targets = [p for p in self.listed() if p["installed"] and self.behind.get(p["id"])]
@@ -527,7 +584,9 @@ class SettingsManager(Adw.Application):
                 else:
                     failed.append(f"{p['name']}:\n{result.text()}")
             return core.Result(1, "", "\n\n".join(failed)) if failed else core.Result(0)
-        self.job(_("Updating {0} plugins…").format(len(targets)), work, _("All plugins are updated."))
+        self.job(_("Updating {0} plugins…").format(len(targets)), work, "",
+                 lambda r: self.offer_shell_restart(_("All plugins are updated. Their bar widgets change after a shell restart."))
+                 if r.ok else None)
 
     def act_remove(self, plugin: dict):
         if plugin["id"] == core.OWN_ID:
@@ -867,6 +926,7 @@ class SettingsManager(Adw.Application):
         if plugin["firstParty"]:
             fact(_("Source"), _("Built into Omarchy"))
         self.detail_box.append(facts)
+        guard_text_fields(self.detail_box, self)
         if self.current_page() == "detail":
             self.page_title.set_text(plugin["name"])
 
@@ -875,14 +935,15 @@ class SettingsManager(Adw.Application):
             self.job(_("Saving {0}…").format(key), lambda: core.set_setting(plugin["id"], key, new, section, index),
                      _("Saved. The widget uses it at once."))
 
+        title = GLib.markup_escape_text(key)            # names come from shell.json: plain text
         if isinstance(value, bool):
-            row = Adw.SwitchRow(title=key, active=value)
+            row = Adw.SwitchRow(title=title, active=value)
             row.connect("notify::active", lambda r, _p: save(r.get_active()) if r.get_active() != value else None)
             return row
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             digits = 0 if isinstance(value, int) else 2
             adjustment = Gtk.Adjustment(lower=-1e9, upper=1e9, step_increment=1 if digits == 0 else 0.1, value=value)
-            row = Adw.SpinRow(title=key, adjustment=adjustment, digits=digits)
+            row = Adw.SpinRow(title=title, adjustment=adjustment, digits=digits)
             pending = {"source": 0}
 
             def changed(*_args):
@@ -900,7 +961,8 @@ class SettingsManager(Adw.Application):
             row.connect("notify::value", changed)
             return row
         text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-        row = Adw.EntryRow(title=key if isinstance(value, str) else _("{0} (JSON)").format(key), show_apply_button=True)
+        row = Adw.EntryRow(title=title if isinstance(value, str) else GLib.markup_escape_text(_("{0} (JSON)").format(key)),
+                           show_apply_button=True)
         row.set_text(text)
 
         def applied(r):
@@ -1026,6 +1088,8 @@ class SettingsManager(Adw.Application):
     def drop_target(self, widget: Gtk.Widget, section: str, position: int):
         """Dropping a bar row here puts it before this row (or at the end of an area)."""
         target = Gtk.DropTarget.new(str, Gdk.DragAction.MOVE)
+        # Only our own rows: text dragged in from another app would be read without a limit.
+        target.connect("accept", lambda _t, drop: drop.get_drag() is not None)
         target.connect("enter", lambda *_: (widget.add_css_class("sm-drop"), Gdk.DragAction.MOVE)[1])
         target.connect("leave", lambda *_: widget.remove_css_class("sm-drop"))
 

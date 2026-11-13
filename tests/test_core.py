@@ -136,6 +136,59 @@ class CommandsTest(unittest.TestCase):
         self.assertEqual(folders["super.panel"].name, "super-panel")
 
 
+class HostileTest(unittest.TestCase):
+    def test_endless_output_is_capped_and_ended(self):
+        result = core.run(["yes", "flood"], timeout=10, max_bytes=100_000)
+        self.assertIsNone(result.code)
+        self.assertLessEqual(len(result.out), 100_000)
+        self.assertIn("too long", result.err)
+
+    def test_endless_stderr_is_capped_too(self):
+        result = core.run(["sh", "-c", "yes x >&2"], timeout=10, max_bytes=50_000)
+        self.assertIsNone(result.code)
+        self.assertLessEqual(len(result.err), 50_000 + 40)
+
+    def test_slow_trickle_meets_one_deadline(self):
+        import time as _t
+        start = _t.monotonic()
+        result = core.run(["sh", "-c", "while :; do echo .; sleep 0.1; done"], timeout=0.8)
+        self.assertLess(_t.monotonic() - start, 5)
+        self.assertIsNone(result.code)
+        self.assertIn("timed out", result.err)
+
+    def test_write_private_json_never_follows_a_planted_link(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            victim = root / "victim.txt"
+            victim.write_text("keep")
+            target = root / "settings.json"
+            # a guessable temp name pointing elsewhere must not be used
+            (root / ".settings.json.1234.tmp").symlink_to(victim)
+            core.write_private_json(target, {"a": 1})
+            self.assertEqual(victim.read_text(), "keep")
+            self.assertEqual(json.loads(target.read_text()), {"a": 1})
+            self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(sorted(p.name for p in root.iterdir()), [".settings.json.1234.tmp", "settings.json", "victim.txt"])
+
+    def test_clipboard_read_is_capped(self):
+        with mock.patch.object(core, "run", return_value=core.Result(None, "x" * 10, "\n(output too long; stopped)")) as run:
+            self.assertIsNone(core.clipboard_text())
+        self.assertEqual(run.call_args.kwargs["max_bytes"], core.MAX_PASTE)
+        with mock.patch.object(core, "run", return_value=core.Result(1, "", "Nothing is copied")):
+            self.assertEqual(core.clipboard_text(), "")
+        with mock.patch.object(core, "run", return_value=core.Result(0, "a\x1b[31mb\tc\n")):
+            self.assertEqual(core.clipboard_text(), "a[31mb\tc")
+
+    def test_git_never_runs_repo_configured_programs(self):
+        with mock.patch.object(core, "run", return_value=core.Result(0, "")) as run, tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / ".git").mkdir()
+            core.git_facts(Path(tmp))
+            core.behind_count(Path(tmp))
+        for call in run.call_args_list:
+            argv = call[0][0]
+            self.assertEqual(argv[:5], ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"])
+
+
 class MarketplaceTest(unittest.TestCase):
     def test_slim_keeps_installable_github_entries(self):
         catalog = {"plugins": [

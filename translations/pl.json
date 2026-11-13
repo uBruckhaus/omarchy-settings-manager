@@ -6,7 +6,6 @@
  "Actions": "Akcje",
  "After the centre": "Za środkiem",
  "All plugins are up to date.": "Wszystkie wtyczki są aktualne.",
- "All plugins are updated.": "Wszystkie wtyczki zostały zaktualizowane.",
  "Back (Backspace)": "Wstecz (Backspace)",
  "Bar": "Pasek",
  "Bar widget": "Widżet paska",
@@ -140,7 +139,6 @@
  "{0} is on.": "{0} – włączone.",
  "{0} is out of the bar.": "Usunięto {0} z paska.",
  "{0} is removed.": "Usunięto {0}.",
- "{0} is updated. Restart the shell if its bar widget doesn't change.": "Zaktualizowano {0}. Uruchom ponownie powłokę, jeśli widżet na pasku się nie zmieni.",
  "\u0004{0} installable plugin": [
   "{0} wtyczka do zainstalowania",
   "{0} wtyczki do zainstalowania",
@@ -184,5 +182,9 @@
  "A picture of this window in ~/Pictures/Settings Manager, with an optional note.": "Obraz tego okna w ~/Pictures/Settings Manager, z opcjonalną notatką.",
  "Ctrl+1…5 pages · Ctrl+F filter · F5 reload · Backspace back · Esc back or close · F12 screenshot": "Ctrl+1…5 strony · Ctrl+F filtr · F5 odśwież · Backspace wstecz · Esc wstecz lub zamknij · F12 zrzut ekranu",
  "Drag a widget here, or use its ⋮ menu.": "Przeciągnij tu widżet lub użyj jego menu ⋮.",
- "Drag to move it along the bar": "Przeciągnij, aby przesunąć na pasku"
+ "Drag to move it along the bar": "Przeciągnij, aby przesunąć na pasku",
+ "Restart the shell": "Uruchom ponownie powłokę",
+ "{0} is updated. Its bar widget changes after a shell restart.": "{0} zaktualizowano. Jego widżet na pasku zmieni się po ponownym uruchomieniu powłoki.",
+ "All plugins are updated. Their bar widgets change after a shell restart.": "Wszystkie wtyczki zaktualizowano. Ich widżety na pasku zmienią się po ponownym uruchomieniu powłoki.",
+ "Clipboard text is too long to paste (max {0} KiB)": "Tekst w schowku jest za długi do wklejenia (maks. {0} KiB)"
 }

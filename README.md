@@ -3,7 +3,28 @@
 Manage your installed Omarchy shell plugins in one window, laid out like a settings app
 (a sidebar of pages left, the page right; modelled on Maprisma Settings).
 
-Version 0.2.0 · plugin id `ubruckhaus.settings-manager` · MIT
+Version 0.3.0 · plugin id `ubruckhaus.settings-manager` · MIT
+
+## Install
+
+From the marketplace, or:
+
+```bash
+omarchy plugin add https://github.com/uBruckhaus/omarchy-settings-manager.git --enable
+```
+
+Needs nothing beyond what Omarchy ships: Python 3 with PyGObject, GTK 4 and libadwaita, git, curl and
+`wl-paste`. It never asks for root or administrator rights.
+
+## Remove
+
+```bash
+omarchy plugin remove ubruckhaus.settings-manager
+```
+
+Its own files outside the plugin folder, deleted by hand if you want them gone:
+`~/.config/omarchy/settings-manager/` (its settings), `~/.cache/settings-manager/` (the catalog copy) and
+`~/Pictures/Settings Manager/` (F12 screenshots, only if you took any).
 
 ## Pages
 
@@ -55,6 +76,26 @@ checks are not a security audit.
 
 All commands run with an argument list (no shell), a timeout and an output cap; one that hangs is ended
 with its process group. Text from manifests and the catalog is cleaned before it is shown.
+
+## Network and capabilities
+
+- **Network:** the Get plugins page downloads the marketplace catalog from
+  `raw.githubusercontent.com/omacom/omarchy-plugin-marketplace` (https only, no redirects, 64 MB and
+  90 s caps, at most once a day unless you press reload). The update check runs `git fetch` against each
+  plugin checkout's own `origin` remote; you can turn it off in Settings. Nothing else is sent anywhere.
+- **Installing, updating and removing plugins** is only done when you press the button and, for install
+  and remove, confirm a dialog. It runs Omarchy's own `omarchy-plugin-add`, `-update` and `-remove`
+  (argv, never a shell); install accepts only `https://github.com/<owner>/<repo>` URLs from the catalog.
+  Settings Manager refuses to remove itself.
+- **Your files:** `shell.json` is changed only through the shell's IPC, and only by your actions (move,
+  put in, take out, a setting you edit). Its own settings and cache are written atomically through private
+  temp files (0600).
+- **Shell restart:** after an update a "Restart the shell" button runs `omarchy restart shell` when you
+  press it.
+- **Untrusted text:** plugin manifests, catalog entries and `shell.json` keys are shown as plain text
+  (control characters removed, markup escaped). Text fields read the clipboard only through `wl-paste`
+  with a 16 KiB cap and a 2 s deadline, accept no text drops from other apps, and drag and drop on the Bar
+  page takes only its own rows. git runs with `core.fsmonitor=false` and no hooks.
 
 ## Files
 

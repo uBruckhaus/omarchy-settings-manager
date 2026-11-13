@@ -6,7 +6,6 @@
  "Actions": "Acciones",
  "After the centre": "Después del centro",
  "All plugins are up to date.": "Todos los plugins están al día.",
- "All plugins are updated.": "Todos los plugins se han actualizado.",
  "Back (Backspace)": "Atrás (Backspace)",
  "Bar": "Barra",
  "Bar widget": "Widget de barra",
@@ -140,7 +139,6 @@
  "{0} is on.": "{0} está activado.",
  "{0} is out of the bar.": "{0} ya no está en la barra.",
  "{0} is removed.": "{0} se ha eliminado.",
- "{0} is updated. Restart the shell if its bar widget doesn't change.": "{0} está actualizado. Reinicia el shell si su widget de barra no cambia.",
  "\u0004{0} installable plugin": [
   "{0} plugin instalable",
   "{0} plugins instalables"
@@ -179,5 +177,9 @@
  "A picture of this window in ~/Pictures/Settings Manager, with an optional note.": "Una imagen de esta ventana en ~/Pictures/Settings Manager, con una nota opcional.",
  "Ctrl+1…5 pages · Ctrl+F filter · F5 reload · Backspace back · Esc back or close · F12 screenshot": "Ctrl+1…5 páginas · Ctrl+F filtro · F5 recargar · Backspace atrás · Esc atrás o cerrar · F12 captura",
  "Drag a widget here, or use its ⋮ menu.": "Arrastra un widget aquí o usa su menú ⋮.",
- "Drag to move it along the bar": "Arrastrar para moverlo en la barra"
+ "Drag to move it along the bar": "Arrastrar para moverlo en la barra",
+ "Restart the shell": "Reiniciar el shell",
+ "{0} is updated. Its bar widget changes after a shell restart.": "{0} está actualizado. Su widget de la barra cambia tras reiniciar el shell.",
+ "All plugins are updated. Their bar widgets change after a shell restart.": "Todos los plugins están actualizados. Sus widgets de la barra cambian tras reiniciar el shell.",
+ "Clipboard text is too long to paste (max {0} KiB)": "El texto del portapapeles es demasiado largo para pegar (máx. {0} KiB)"
 }

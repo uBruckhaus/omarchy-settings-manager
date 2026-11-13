@@ -6,7 +6,6 @@
  "Actions": "Aktionen",
  "After the centre": "Nach der Mitte",
  "All plugins are up to date.": "Alle Plugins sind aktuell.",
- "All plugins are updated.": "Alle Plugins wurden aktualisiert.",
  "Back (Backspace)": "Zurück (Backspace)",
  "Bar": "Leiste",
  "Bar widget": "Leisten-Widget",
@@ -140,7 +139,6 @@
  "{0} is on.": "{0} ist an.",
  "{0} is out of the bar.": "{0} ist aus der Leiste genommen.",
  "{0} is removed.": "{0} ist entfernt.",
- "{0} is updated. Restart the shell if its bar widget doesn't change.": "{0} ist aktualisiert. Die Shell neu starten, falls sich das Leisten-Widget nicht ändert.",
  "\u0004{0} installable plugin": [
   "{0} installierbares Plugin",
   "{0} installierbare Plugins"
@@ -179,5 +177,9 @@
  "A picture of this window in ~/Pictures/Settings Manager, with an optional note.": "Ein Bild dieses Fensters in ~/Pictures/Settings Manager, mit einer optionalen Notiz.",
  "Ctrl+1…5 pages · Ctrl+F filter · F5 reload · Backspace back · Esc back or close · F12 screenshot": "Strg+1…5 Seiten · Strg+F Filter · F5 neu laden · Backspace zurück · Esc zurück oder schließen · F12 Bildschirmfoto",
  "Drag a widget here, or use its ⋮ menu.": "Ein Widget hierher ziehen oder sein ⋮-Menü nutzen.",
- "Drag to move it along the bar": "Ziehen, um es in der Leiste zu verschieben"
+ "Drag to move it along the bar": "Ziehen, um es in der Leiste zu verschieben",
+ "Restart the shell": "Shell neu starten",
+ "{0} is updated. Its bar widget changes after a shell restart.": "{0} ist aktualisiert. Sein Leisten-Widget ändert sich nach einem Neustart der Shell.",
+ "All plugins are updated. Their bar widgets change after a shell restart.": "Alle Plugins sind aktualisiert. Ihre Leisten-Widgets ändern sich nach einem Neustart der Shell.",
+ "Clipboard text is too long to paste (max {0} KiB)": "Text in der Zwischenablage ist zu lang zum Einfügen (max. {0} KiB)"
 }

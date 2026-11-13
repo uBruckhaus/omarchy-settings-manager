@@ -6,7 +6,6 @@
  "Actions": "Acties",
  "After the centre": "Na het midden",
  "All plugins are up to date.": "Alle plugins zijn up-to-date.",
- "All plugins are updated.": "Alle plugins zijn bijgewerkt.",
  "Back (Backspace)": "Terug (Backspace)",
  "Bar": "Balk",
  "Bar widget": "Balkwidget",
@@ -140,7 +139,6 @@
  "{0} is on.": "{0} is aan.",
  "{0} is out of the bar.": "{0} is uit de balk gehaald.",
  "{0} is removed.": "{0} is verwijderd.",
- "{0} is updated. Restart the shell if its bar widget doesn't change.": "{0} is bijgewerkt. Herstart de shell als de balkwidget niet verandert.",
  "\u0004{0} installable plugin": [
   "{0} installeerbare plugin",
   "{0} installeerbare plugins"
@@ -179,5 +177,9 @@
  "A picture of this window in ~/Pictures/Settings Manager, with an optional note.": "Een afbeelding van dit venster in ~/Pictures/Settings Manager, met een optionele notitie.",
  "Ctrl+1…5 pages · Ctrl+F filter · F5 reload · Backspace back · Esc back or close · F12 screenshot": "Ctrl+1…5 pagina's · Ctrl+F filter · F5 herladen · Backspace terug · Esc terug of sluiten · F12 schermafbeelding",
  "Drag a widget here, or use its ⋮ menu.": "Sleep een widget hierheen of gebruik het ⋮-menu.",
- "Drag to move it along the bar": "Slepen om het in de balk te verplaatsen"
+ "Drag to move it along the bar": "Slepen om het in de balk te verplaatsen",
+ "Restart the shell": "Shell herstarten",
+ "{0} is updated. Its bar widget changes after a shell restart.": "{0} is bijgewerkt. Zijn balkwidget verandert na een herstart van de shell.",
+ "All plugins are updated. Their bar widgets change after a shell restart.": "Alle plugins zijn bijgewerkt. Hun balkwidgets veranderen na een herstart van de shell.",
+ "Clipboard text is too long to paste (max {0} KiB)": "Tekst op het klembord is te lang om te plakken (max. {0} KiB)"
 }

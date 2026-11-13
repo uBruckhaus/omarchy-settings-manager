@@ -17,6 +17,8 @@ import re
 import shutil
 import signal
 import subprocess
+import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -61,7 +63,9 @@ class Result:
 
 
 def run(argv: list, timeout: float = 20.0, max_bytes: int = MAX_OUTPUT, env: dict | None = None) -> Result:
-    """Run argv (no shell) in its own process group; past the timeout the group is ended."""
+    """Run argv (no shell) in its own process group. stdout and stderr are read as they come, each
+    capped at max_bytes; past the cap or the one overall deadline the whole group is ended, so a
+    command that floods or hangs costs neither memory nor time."""
     program = argv[0] if os.path.isabs(argv[0]) else shutil.which(argv[0])
     if program is None:
         return Result(None, "", f"{argv[0]}: not found")
@@ -75,13 +79,50 @@ def run(argv: list, timeout: float = 20.0, max_bytes: int = MAX_OUTPUT, env: dic
                                 stderr=subprocess.PIPE, start_new_session=True, env=full_env)
     except OSError as exc:
         return Result(None, "", str(exc))
+    streams = {"out": [proc.stdout, [], 0], "err": [proc.stderr, [], 0]}
+    over = threading.Event()
+
+    def reader(key):
+        pipe, chunks, _total = streams[key]
+        try:
+            while chunk := pipe.read1(65536):
+                streams[key][2] += len(chunk)
+                if streams[key][2] > max_bytes:
+                    over.set()
+                    return
+                chunks.append(chunk)
+        except (OSError, ValueError):
+            over.set()
+
+    threads = [threading.Thread(target=reader, args=(k,), daemon=True) for k in streams]
+    for thread in threads:
+        thread.start()
+    deadline = time.monotonic() + timeout
+    for thread in threads:
+        while thread.is_alive() and not over.is_set() and time.monotonic() < deadline:
+            thread.join(min(0.1, max(0.0, deadline - time.monotonic())))
+    timed_out = any(t.is_alive() for t in threads) and not over.is_set()
+    if timed_out or over.is_set():
+        _end_group(proc)
+        for thread in threads:
+            thread.join(2.0)
     try:
-        out, err = proc.communicate(timeout=timeout)
+        code = proc.wait(timeout=3.0)
     except subprocess.TimeoutExpired:
         _end_group(proc)
-        out, err = proc.communicate()
-        return Result(None, _cut(out, max_bytes), _cut(err, max_bytes) + "\n(timed out)")
-    return Result(proc.returncode, _cut(out, max_bytes), _cut(err, max_bytes))
+        code = None
+    for pipe in (proc.stdout, proc.stderr):
+        try:
+            pipe.close()
+        except OSError:
+            pass
+    out = _cut(b"".join(streams["out"][1]), max_bytes)
+    err = _cut(b"".join(streams["err"][1]), max_bytes)
+    if over.is_set():
+        return Result(None, out, err + "\n(output too long; stopped)")
+    if timed_out:
+        return Result(None, out, err + "\n(timed out)")
+    return Result(code, out, err)
 
 
 def _end_group(proc):
@@ -193,20 +234,24 @@ def repo_web_url(remote: str) -> str:
     return ""
 
 
+# A checkout's own .git/config could name programs git runs (fsmonitor, hooks): ours never do.
+GIT = ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"]
+
+
 def git_facts(folder: Path) -> dict:
     """A checkout's commit, branch, remote and local changes ({} when it is no git checkout)."""
     if not (folder / ".git").exists():
         return {}
     facts = {"git": True}
-    head = run(["git", "-C", str(folder), "rev-parse", "--short", "HEAD"], timeout=5)
+    head = run([*GIT, "-C", str(folder), "rev-parse", "--short", "HEAD"], timeout=5)
     facts["commit"] = head.out.strip() if head.ok else ""
-    branch = run(["git", "-C", str(folder), "rev-parse", "--abbrev-ref", "HEAD"], timeout=5)
+    branch = run([*GIT, "-C", str(folder), "rev-parse", "--abbrev-ref", "HEAD"], timeout=5)
     facts["branch"] = branch.out.strip() if branch.ok else ""
-    remote = run(["git", "-C", str(folder), "remote", "get-url", "origin"], timeout=5)
+    remote = run([*GIT, "-C", str(folder), "remote", "get-url", "origin"], timeout=5)
     facts["remote"] = remote.out.strip() if remote.ok else ""
-    status = run(["git", "-C", str(folder), "status", "--porcelain", "--untracked-files=no"], timeout=10)
+    status = run([*GIT, "-C", str(folder), "status", "--porcelain", "--untracked-files=no"], timeout=10)
     facts["dirty"] = bool(status.out.strip()) if status.ok else False
-    when = run(["git", "-C", str(folder), "log", "-1", "--format=%ct"], timeout=5)
+    when = run([*GIT, "-C", str(folder), "log", "-1", "--format=%ct"], timeout=5)
     facts["committed"] = int(when.out.strip()) if when.ok and when.out.strip().isdigit() else 0
     return facts
 
@@ -217,16 +262,16 @@ def behind_count(folder: Path, fetch: bool = True) -> int | None:
     if not (folder / ".git").exists():
         return None
     if fetch:
-        fetched = run(["git", "-C", str(folder), "fetch", "--quiet", "--no-tags", "origin", "HEAD"], timeout=45)
+        fetched = run([*GIT, "-C", str(folder), "fetch", "--quiet", "--no-tags", "origin", "HEAD"], timeout=45)
         if not fetched.ok:
             return None
-    count = run(["git", "-C", str(folder), "rev-list", "--count", "HEAD..FETCH_HEAD"], timeout=10)
+    count = run([*GIT, "-C", str(folder), "rev-list", "--count", "HEAD..FETCH_HEAD"], timeout=10)
     return int(count.out.strip()) if count.ok and count.out.strip().isdigit() else None
 
 
 def incoming_log(folder: Path, limit: int = 30) -> str:
     """The subjects of the commits an update would bring (after a fetch)."""
-    log = run(["git", "-C", str(folder), "log", "--format=%h %s", f"-{limit}", "HEAD..FETCH_HEAD"], timeout=10)
+    log = run([*GIT, "-C", str(folder), "log", "--format=%h %s", f"-{limit}", "HEAD..FETCH_HEAD"], timeout=10)
     return log.out.strip() if log.ok else ""
 
 
@@ -399,6 +444,40 @@ def set_setting(plugin_id: str, key: str, value, section: str, index: int) -> Re
         return Result(None, "", "invalid setting")
     selector = {"section": section, "index": int(index)}
     return _ipc_result(shell_call("setBarWidget", plugin_id, key, json.dumps(value), json.dumps(selector)))
+
+
+def write_private_json(path: Path, data) -> None:
+    """Write JSON atomically and privately: a fresh unique temp file (never a predictable name,
+    never through a link), 0600, fsync, then rename over the old file; no temp file is left behind."""
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=1, ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+MAX_PASTE = 16 * 1024
+
+
+def clipboard_text() -> str | None:
+    """The clipboard's text for a paste: wl-paste, capped and with a deadline (GTK's own paste reads
+    a foreign client's offer without limit). "" when empty; None when too long or unreadable."""
+    result = run(["wl-paste", "--no-newline", "--type", "text/plain;charset=utf-8"], timeout=2, max_bytes=MAX_PASTE)
+    if result.code is None:
+        return None if "too long" in result.err else ""
+    if not result.ok:
+        return ""                       # an empty clipboard makes wl-paste fail: nothing to paste
+    return "".join(c for c in result.out if c.isprintable() or c == "\t")
 
 
 def _ipc_result(result: Result) -> Result:
