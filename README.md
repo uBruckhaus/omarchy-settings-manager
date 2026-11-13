@@ -3,7 +3,7 @@
 Manage your installed Omarchy shell plugins in one window, laid out like a settings app
 (a sidebar of pages left, the page right; modelled on Maprisma Settings).
 
-Version 0.3.0 · plugin id `ubruckhaus.settings-manager` · MIT
+Version 0.3.1 · plugin id `ubruckhaus.settings-manager` · MIT
 
 ## Install
 
@@ -81,8 +81,11 @@ with its process group. Text from manifests and the catalog is cleaned before it
 
 - **Network:** the Get plugins page downloads the marketplace catalog from
   `raw.githubusercontent.com/omacom/omarchy-plugin-marketplace` (https only, no redirects, 64 MB and
-  90 s caps, at most once a day unless you press reload). The update check runs `git fetch` against each
-  plugin checkout's own `origin` remote; you can turn it off in Settings. Nothing else is sent anywhere.
+  90 s caps, read straight into memory, at most once a day unless you press reload). The update check
+  runs `git fetch` against each plugin checkout's `origin`, only when that is an https URL (you can turn
+  the check off in Settings). Beyond that, the network is only used by what you start yourself: Install,
+  Update (Omarchy's `git clone` / `git pull`) and the GitHub or marketplace links, which open in your
+  browser.
 - **Installing, updating and removing plugins** is only done when you press the button and, for install
   and remove, confirm a dialog. It runs Omarchy's own `omarchy-plugin-add`, `-update` and `-remove`
   (argv, never a shell); install accepts only `https://github.com/<owner>/<repo>` URLs from the catalog.
@@ -94,8 +97,11 @@ with its process group. Text from manifests and the catalog is cleaned before it
   press it.
 - **Untrusted text:** plugin manifests, catalog entries and `shell.json` keys are shown as plain text
   (control characters removed, markup escaped). Text fields read the clipboard only through `wl-paste`
-  with a 16 KiB cap and a 2 s deadline, accept no text drops from other apps, and drag and drop on the Bar
-  page takes only its own rows. git runs with `core.fsmonitor=false` and no hooks.
+  with a 16 KiB cap and a 2 s deadline, accept no text drops from other apps, and the Bar page's drop targets accept a drop only
+  when GTK reports it as a drag from this window (`Gdk.Drop.get_drag()`), so text dragged in from other
+  apps is refused. git runs with `core.fsmonitor=false`, no hooks, no credential helper or askpass, and
+  only the https transport; local changes are found with `diff-index` / `diff-files`, which run no
+  content filters.
 
 ## Files
 

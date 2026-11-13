@@ -46,7 +46,7 @@ import theme  # noqa: E402
 from i18n import N_, _, ngettext  # noqa: E402
 
 APP_ID = "org.omarchy.settingsmanager"
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 CONFIG_DIR = Path.home() / ".config/omarchy/settings-manager"
 SETTINGS_FILE = CONFIG_DIR / "settings.json"
 i18n.SETTINGS_FILE = SETTINGS_FILE

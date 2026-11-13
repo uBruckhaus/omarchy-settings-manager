@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import tempfile
 import threading
@@ -126,16 +127,24 @@ def run(argv: list, timeout: float = 20.0, max_bytes: int = MAX_OUTPUT, env: dic
 
 
 def _end_group(proc):
-    for sig, wait in ((signal.SIGTERM, 3.0), (signal.SIGKILL, 3.0)):
-        try:
-            os.killpg(proc.pid, sig)
-        except (ProcessLookupError, PermissionError):
-            return
-        try:
-            proc.wait(timeout=wait)
-            return
-        except subprocess.TimeoutExpired:
-            continue
+    """TERM the whole group, give it a moment, then KILL the group in any case: a child that
+    ignores TERM must not outlive its leader."""
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        proc.wait(timeout=2.0)
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        proc.wait(timeout=2.0)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def _cut(data: bytes, max_bytes: int) -> str:
@@ -152,8 +161,17 @@ def shell_call(method: str, *args: str, timeout: float = 10.0) -> Result:
 def read_json_file(path: Path, max_bytes: int = MAX_MANIFEST):
     """A small JSON file, or None (missing, too big, not JSON)."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+        # O_NONBLOCK: a FIFO or device put there opens at once instead of blocking the scan;
+        # then only a regular file is read.
+        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK)
     except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            return None
+    except OSError:
+        os.close(fd)
         return None
     try:
         with os.fdopen(fd, "rb") as handle:
@@ -234,8 +252,12 @@ def repo_web_url(remote: str) -> str:
     return ""
 
 
-# A checkout's own .git/config could name programs git runs (fsmonitor, hooks): ours never do.
-GIT = ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"]
+# A checkout's own .git/config could name programs git runs (fsmonitor, hooks, credential helpers,
+# askpass, other transports): ours never do. Reading commands avoid `git status`, which may run
+# content filters; fetches only go over https to an https origin.
+GIT = ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "credential.helper=",
+       "-c", "core.askPass=", "-c", "protocol.allow=never", "-c", "protocol.https.allow=always"]
+HTTPS_REMOTE_RE = re.compile(r"^https://[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?/[A-Za-z0-9._~/-]{1,300}$")
 
 
 def git_facts(folder: Path) -> dict:
@@ -249,8 +271,10 @@ def git_facts(folder: Path) -> dict:
     facts["branch"] = branch.out.strip() if branch.ok else ""
     remote = run([*GIT, "-C", str(folder), "remote", "get-url", "origin"], timeout=5)
     facts["remote"] = remote.out.strip() if remote.ok else ""
-    status = run([*GIT, "-C", str(folder), "status", "--porcelain", "--untracked-files=no"], timeout=10)
-    facts["dirty"] = bool(status.out.strip()) if status.ok else False
+    # Local changes: staged (index vs HEAD) or in the work tree (stat compare); neither runs filters.
+    staged = run([*GIT, "-C", str(folder), "diff-index", "--cached", "--quiet", "HEAD", "--"], timeout=10)
+    changed = run([*GIT, "-C", str(folder), "diff-files", "--name-only"], timeout=10)
+    facts["dirty"] = staged.code == 1 or bool(changed.ok and changed.out.strip())
     when = run([*GIT, "-C", str(folder), "log", "-1", "--format=%ct"], timeout=5)
     facts["committed"] = int(when.out.strip()) if when.ok and when.out.strip().isdigit() else 0
     return facts
@@ -262,6 +286,9 @@ def behind_count(folder: Path, fetch: bool = True) -> int | None:
     if not (folder / ".git").exists():
         return None
     if fetch:
+        remote = run([*GIT, "-C", str(folder), "remote", "get-url", "origin"], timeout=5)
+        if not remote.ok or not HTTPS_REMOTE_RE.match(remote.out.strip()):
+            return None                 # only https origins are checked (no ssh, file or ext transports)
         fetched = run([*GIT, "-C", str(folder), "fetch", "--quiet", "--no-tags", "origin", "HEAD"], timeout=45)
         if not fetched.ok:
             return None

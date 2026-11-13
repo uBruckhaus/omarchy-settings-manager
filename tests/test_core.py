@@ -189,6 +189,74 @@ class HostileTest(unittest.TestCase):
             self.assertEqual(argv[:5], ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"])
 
 
+class RoundOneTest(unittest.TestCase):
+    def test_fifo_manifest_does_not_block(self):
+        import os as _os, time as _t
+        with tempfile.TemporaryDirectory() as tmp:
+            fifo = Path(tmp) / "manifest.json"
+            _os.mkfifo(fifo)
+            start = _t.monotonic()
+            self.assertIsNone(core.read_json_file(fifo))
+            self.assertLess(_t.monotonic() - start, 1)
+
+    def test_child_ignoring_term_is_killed(self):
+        import os as _os, time as _t
+        with tempfile.TemporaryDirectory() as tmp:
+            pidfile = Path(tmp) / "pid"
+            script = f"sh -c 'trap \"\" TERM; echo $$ > {pidfile}; while :; do sleep 0.1; done' & sleep 30"
+            core.run(["sh", "-c", script], timeout=0.8)
+            pid = int(pidfile.read_text())
+            _t.sleep(0.3)
+            with self.assertRaises(ProcessLookupError):
+                _os.kill(pid, 0)
+
+    def test_fetch_only_from_https_origins(self):
+        for remote in ("ext::sh -c touch% /tmp/x", "file:///etc", "git@github.com:a/b.git", "ssh://host/x", "https://h/x y"):
+            with mock.patch.object(core, "run", return_value=core.Result(0, remote + "\n")) as run, tempfile.TemporaryDirectory() as tmp:
+                (Path(tmp) / ".git").mkdir()
+                self.assertIsNone(core.behind_count(Path(tmp)))
+            self.assertFalse(any("fetch" in c[0][0] for c in run.call_args_list), remote)
+
+    def test_git_restricts_transports_and_helpers(self):
+        for option in ("protocol.allow=never", "protocol.https.allow=always", "credential.helper=", "core.askPass="):
+            self.assertIn(option, core.GIT)
+
+    def test_dirty_check_does_not_use_status(self):
+        with mock.patch.object(core, "run", return_value=core.Result(0, "")) as run, tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / ".git").mkdir()
+            core.git_facts(Path(tmp))
+        self.assertFalse(any("status" in c[0][0] for c in run.call_args_list))
+
+    def test_cache_dir_must_be_private(self):
+        import os as _os
+        with tempfile.TemporaryDirectory() as tmp:
+            shared = Path(tmp) / "settings-manager"
+            shared.mkdir()
+            _os.chmod(shared, 0o777)
+            with mock.patch.object(marketplace, "CACHE_DIR", shared), mock.patch.object(marketplace, "CACHE_FILE", shared / "c.json"):
+                with self.assertRaises(PermissionError):
+                    marketplace.private_cache_dir()
+                self.assertIsNone(marketplace.cached())
+            link = Path(tmp) / "link"
+            link.symlink_to(Path(tmp))
+            with mock.patch.object(marketplace, "CACHE_DIR", link):
+                with self.assertRaises(PermissionError):
+                    marketplace.private_cache_dir()
+
+    def test_download_keeps_no_file(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(marketplace, "CACHE_DIR", Path(tmp) / "c"), \
+                mock.patch.object(marketplace, "CACHE_FILE", Path(tmp) / "c" / "catalog.json"), \
+                mock.patch.object(core, "run", return_value=core.Result(0, json.dumps({"plugins": [
+                    {"id": "a.b", "repo": "https://github.com/a/b", "installAvailable": True}]}))) as run:
+            entries, error = marketplace.download()
+            self.assertEqual([e["id"] for e in entries], ["a.b"])
+            self.assertEqual(sorted(p.name for p in (Path(tmp) / "c").iterdir()), ["catalog.json"])
+        argv = run.call_args[0][0]
+        self.assertIn("--max-redirs", argv)
+        self.assertEqual(argv[argv.index("--output") + 1], "-")
+
+
 class MarketplaceTest(unittest.TestCase):
     def test_slim_keeps_installable_github_entries(self):
         catalog = {"plugins": [

@@ -8,8 +8,9 @@ window runs `omarchy plugin add` through plugins_core.add().
 
 from __future__ import annotations
 
+import json
 import os
-import tempfile
+import stat
 import time
 from pathlib import Path
 
@@ -59,6 +60,7 @@ def slim(catalog) -> list:
 def cached(max_age: float = MAX_AGE) -> list | None:
     """The slim catalog from the cache when it is younger than max_age, else None."""
     try:
+        private_cache_dir()
         if time.time() - CACHE_FILE.stat().st_mtime > max_age:
             return None
     except OSError:
@@ -68,29 +70,38 @@ def cached(max_age: float = MAX_AGE) -> list | None:
 
 
 def download() -> tuple:
-    """Fetch the catalog now: (entries, error text). Keeps the slim copy on success."""
-    CACHE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd, raw_name = tempfile.mkstemp(dir=CACHE_DIR, prefix=".download.")     # curl writes into our own file
-    os.close(fd)
-    raw = Path(raw_name)
-    result = plugins_core.run(["curl", "--proto", "=https", "--fail", "--silent",
-                               "--show-error", "--max-redirs", "0", "--max-time", "90",
-                               "--max-filesize", str(MAX_DOWNLOAD), "--output", str(raw), CATALOG_URL],
-                              timeout=100)
+    """Fetch the catalog now: (entries, error text). curl writes to its stdout, read through the
+    bounded reader (no download file at all); the slim copy is kept on success."""
+    result = plugins_core.run(["curl", "--proto", "=https", "--fail", "--silent", "--show-error",
+                               "--max-redirs", "0", "--max-time", "90", "--max-filesize", str(MAX_DOWNLOAD),
+                               "--output", "-", "--", CATALOG_URL], timeout=100, max_bytes=MAX_DOWNLOAD)
+    if not result.ok:
+        return None, result.err.strip() or "download failed"
     try:
-        if not result.ok:
-            return None, result.text() or "download failed"
-        data = plugins_core.read_json_file(raw, MAX_DOWNLOAD)
-        entries = slim(data)
-        if not entries:
-            return None, "the catalog had no installable plugins"
+        data = json.loads(result.out)
+    except ValueError:
+        return None, "the catalog is not JSON"
+    entries = slim(data)
+    if not entries:
+        return None, "the catalog had no installable plugins"
+    try:
+        private_cache_dir()
         plugins_core.write_private_json(CACHE_FILE, entries)
-        return entries, ""
-    finally:
-        try:
-            raw.unlink()
-        except OSError:
-            pass
+    except OSError:
+        pass                            # no cache: the list still shows
+    return entries, ""
+
+
+def private_cache_dir() -> None:
+    """The cache folder: made 0700 when missing; refused when it is a link, not ours, or open to others."""
+    CACHE_DIR.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.mkdir(CACHE_DIR, 0o700)
+    except FileExistsError:
+        pass
+    info = os.lstat(CACHE_DIR)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+        raise PermissionError(f"{CACHE_DIR} is not a private folder of yours")
 
 
 def load(force: bool = False) -> tuple:
