@@ -378,6 +378,31 @@ class RoundFiveTest(unittest.TestCase):
             self.assertEqual([p.name for p in real.iterdir()], ["settings.json"])
 
 
+class RoundSixTest(unittest.TestCase):
+    def test_cached_entries_are_checked_again(self):
+        good = {"id": "a.b", "name": "B", "description": "", "author": "", "version": "", "category": "", "kind": "",
+                "repo": "https://github.com/a/b", "stars": 1, "verified": False, "official": False, "updated": ""}
+        bad = [dict(good, id="../x"), dict(good, repo="https://evil.example/x"), dict(good, verified="yes"),
+               dict(good, extra=1), "text", dict(good, stars=-1)]
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "c"
+            with mock.patch.object(marketplace, "CACHE_DIR", folder), mock.patch.object(marketplace, "CACHE_FILE", folder / "catalog.json"):
+                core.write_private_json(folder / "catalog.json", [good, *bad])
+                self.assertEqual(marketplace.cached(), [good])
+                (folder / "catalog.json").unlink()
+                (folder / "catalog.json").symlink_to(Path(tmp) / "elsewhere.json")
+                (Path(tmp) / "elsewhere.json").write_text(json.dumps([good]))
+                self.assertIsNone(marketplace.cached())
+
+    def test_incoming_log_has_a_display_budget(self):
+        long = "\n".join(f"abc{i} " + "x" * 5000 for i in range(30))
+        with mock.patch.object(core, "run", return_value=core.Result(0, long)) as run:
+            text = core.incoming_log(Path("/nonexistent"))
+        self.assertLessEqual(len(text), core.MAX_LOG + 2)
+        self.assertTrue(all(len(line) <= core.MAX_LOG_LINE for line in text.splitlines()))
+        self.assertEqual(run.call_args.kwargs["max_bytes"], 64 * 1024)
+
+
 class MarketplaceTest(unittest.TestCase):
     def test_slim_keeps_installable_github_entries(self):
         catalog = {"plugins": [

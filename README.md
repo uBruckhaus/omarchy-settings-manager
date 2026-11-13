@@ -3,7 +3,7 @@
 Manage your installed Omarchy shell plugins in one window, laid out like a settings app
 (a sidebar of pages left, the page right; modelled on Maprisma Settings).
 
-Version 0.3.5 · plugin id `ubruckhaus.settings-manager` · MIT
+Version 0.3.6 · plugin id `ubruckhaus.settings-manager` · MIT
 
 ## Install
 
@@ -69,7 +69,7 @@ Every change goes through Omarchy's own plugin commands and the shell's IPC; the
 The update check runs `git fetch origin HEAD` in each plugin checkout (as `omarchy plugin update` does)
 and counts the new commits; nothing is merged until you press Update.
 
-The marketplace catalog (`site/catalog.json`, about 17 MB) is downloaded at most once a day over https
+The marketplace catalog (`site/catalog.json`, about 17 MB) is downloaded over https when the Get plugins page needs it and no copy younger than a day exists
 with curl and kept as a slim copy in `~/.cache/settings-manager/catalog.json`. Only installable
 entries with an https GitHub repository are shown. Plugins run code on your computer; the marketplace's
 checks are not a security audit.
@@ -81,7 +81,8 @@ with its process group. Text from manifests and the catalog is cleaned before it
 
 - **Network:** the Get plugins page downloads the marketplace catalog from
   `raw.githubusercontent.com/omacom/omarchy-plugin-marketplace` (https only, no redirects, 40 MB and
-  90 s caps, read straight into memory, at most once a day unless you press reload). The update check
+  90 s caps, read straight into memory; a copy younger than a day is used instead,
+  and the reload button fetches it again). The update check
   runs `git fetch` against each plugin checkout's `origin`, only when that is an https URL (you can turn
   the check off in Settings). Beyond that, the network is only used by what you start yourself: Install,
   Update (Omarchy's `git clone` / `git pull`) and the GitHub or marketplace links, which open in your

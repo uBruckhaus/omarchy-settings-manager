@@ -311,10 +311,20 @@ def behind_count(folder: Path, fetch: bool = True) -> int | None:
     return int(count.out.strip()) if count.ok and count.out.strip().isdigit() else None
 
 
+MAX_LOG_LINE = 160
+MAX_LOG = 4000
+
+
 def incoming_log(folder: Path, limit: int = 30) -> str:
     """The subjects of the commits an update would bring (after a fetch)."""
-    log = run([*GIT, "-C", str(folder), "log", "--format=%h %s", f"-{limit}", "HEAD..FETCH_HEAD"], timeout=10)
-    return log.out.strip() if log.ok else ""
+    log = run([*GIT, "-C", str(folder), "log", "--format=%h %s", f"-{limit}", "HEAD..FETCH_HEAD"],
+              timeout=10, max_bytes=64 * 1024)
+    if not log.ok:
+        return ""
+    # Commit subjects come from the remote: a small display budget, one line each.
+    lines = [_text(line, MAX_LOG_LINE) for line in log.out.splitlines()[:limit]]
+    text = "\n".join(line for line in lines if line)
+    return text if len(text) <= MAX_LOG else text[:MAX_LOG] + "\n…"
 
 
 def installed_folders() -> dict:

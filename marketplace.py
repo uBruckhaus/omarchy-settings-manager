@@ -62,16 +62,55 @@ def slim(catalog) -> list:
     return out
 
 
+ENTRY_KEYS = {"id": str, "name": str, "description": str, "author": str, "version": str, "category": str,
+              "kind": str, "repo": str, "stars": int, "verified": bool, "official": bool, "updated": str}
+
+
+def valid_entry(entry) -> bool:
+    """A cached entry has exactly the shape slim() writes; anything else is not shown."""
+    if not isinstance(entry, dict) or set(entry) != set(ENTRY_KEYS):
+        return False
+    if not all(type(entry[k]) is t for k, t in ENTRY_KEYS.items()):
+        return False
+    return valid_id(entry["id"]) and bool(GITHUB_RE.match(entry["repo"])) and entry["stars"] >= 0 \
+        and all(len(entry[k]) <= 1200 for k, t in ENTRY_KEYS.items() if t is str)
+
+
 def cached(max_age: float = MAX_AGE) -> list | None:
-    """The slim catalog from the cache when it is younger than max_age, else None."""
+    """The slim catalog from the cache when it is younger than max_age, else None. The file is
+    opened relative to the verified folder handle (never by a path that could be swapped), as a
+    regular file, and every entry is checked again before it is shown."""
     try:
-        private_cache_dir()
-        if time.time() - CACHE_FILE.stat().st_mtime > max_age:
-            return None
+        dfd = plugins_core.private_dir_fd(CACHE_DIR)
     except OSError:
         return None
-    data = plugins_core.read_json_file(CACHE_FILE, MAX_CACHE)
-    return data if isinstance(data, list) else None
+    try:
+        fd = os.open(CACHE_FILE.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dfd)
+    except OSError:
+        os.close(dfd)
+        return None
+    os.close(dfd)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or time.time() - info.st_mtime > max_age:
+            return None
+        with os.fdopen(fd, "rb") as handle:
+            fd = -1
+            data = handle.read(MAX_CACHE + 1)
+    except OSError:
+        return None
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    if len(data) > MAX_CACHE:
+        return None
+    try:
+        entries = json.loads(data.decode("utf-8", "replace"))
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(entries, list):
+        return None
+    return [e for e in entries[:MAX_ENTRIES] if valid_entry(e)]
 
 
 def download() -> tuple:
