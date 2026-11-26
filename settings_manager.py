@@ -5,12 +5,15 @@ Laid out like Maprisma Settings (a reorderable sidebar of pages left, the page r
 
 - Plugins, Bar, Updates: manage installed Omarchy plugins, bar placement/order/settings, and git
   updates via Omarchy's own commands (plugins_core).
-- Network, Bluetooth, Appearance, Displays, Sound, Power, Input devices, Applications, About:
-  zero-privilege user/desktop settings (pages_desktop, pages_system).
+- Maprisma apps, System apps: installed apps by source, updates, uninstall (pages_apps).
+- Network, Bluetooth, Appearance, Theme, Displays, Sound, Notifications, AI, Voice, Power, Optimize,
+  Input devices, Applications, Time & Language, About: desktop and system settings (pages_desktop,
+  pages_system, pages_theme, pages_services, pages_tune). Admin steps only on a click: polkit
+  (timedatectl, localectl, one pkexec call) or a visible terminal for package changes.
 - Settings: language, update check on opening, Omarchy's own plugins, corners, F12 screenshot key.
 
 A normal app window: started again, it comes to the front; `--toggle` (the bar icon) closes it
-when it is in front; `--page <key>` opens any of the 13 pages, `--plugin <id>` a plugin's details.
+when it is in front; `--page <key>` opens any page (PAGE_KEYS), `--plugin <id>` a plugin's details.
 """
 
 from __future__ import annotations
@@ -513,6 +516,11 @@ class SettingsManager(Adw.Application):
             self.show_page("settings")
             return True
         if ctrl and keyval in (Gdk.KEY_f, Gdk.KEY_F):
+            current = self.current_page()      # a page with its own filter field keeps Ctrl+F
+            field = getattr(self.page_group(current), "search", {}).get(current)
+            if field is not None:
+                field.grab_focus()
+                return True
             self.show_page("plugins")
             self.plugin_search.grab_focus()
             return True
