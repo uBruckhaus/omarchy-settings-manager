@@ -261,7 +261,7 @@ def crash_muted() -> list[str]:
             for entry in entries:
                 if len(names) >= MAX_MUTED:
                     break
-                if entry.is_file() and PROGRAM_RE.match(entry.name):
+                if entry.is_file(follow_symlinks=False) and PROGRAM_RE.match(entry.name):
                     names.append(entry.name)
         return sorted(names, key=str.lower)
     except OSError:
