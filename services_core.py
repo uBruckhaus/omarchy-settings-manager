@@ -396,7 +396,9 @@ def clear_reminders() -> tuple[bool, str]:
 # --- 2. AI ---------------------------------------------------------------------------------------
 #
 # The helpers catalog (Maprisma's /usr/lib/maprisma/data/helpers.json, else the built-in snapshot
-# of maprisma_core_kit's helpers_shipped.g.dart, version 2): id, name, command, in this order.
+# of maprisma_core_kit's helpers_shipped.g.dart, version 2): id, name, command, in this order; only
+# the entries with a one-shot `ask` (Gemini CLI, OpenCode and Goose have none, so no Maprisma app can
+# use them as its helper).
 # Claude Code, Codex, pi and Hermes have their own sign-in check (a credentials file or an API key
 # variable is there; their content is never read), as in Maprisma Settings' ask_ai.dart.
 
@@ -404,12 +406,9 @@ SHIPPED_CATALOG_VERSION = 2
 SHIPPED_HELPERS = (
     ("claude", "Claude Code", "claude"),
     ("codex", "Codex", "codex"),
-    ("gemini", "Gemini CLI", "gemini"),
     ("agy", "Antigravity CLI", "agy"),
-    ("opencode", "OpenCode", "opencode"),
     ("cursor-agent", "Cursor CLI", "cursor-agent"),
     ("copilot", "GitHub Copilot", "copilot"),
-    ("goose", "Goose", "goose"),
     ("grok", "Grok", "grok"),
     ("hermes", "Hermes", "hermes"),
     ("omp", "Oh My Pi", "omp"),
@@ -641,7 +640,23 @@ def read_shared_ai() -> dict:
     """The shared file: whether it is there, readable, and its `helper` ("auto" when missing or
     invalid) and `web_search` (false unless true)."""
     path = ai_file()
-    exists, data = _read_json(path, MAX_AI_FILE)
+    exists, data = False, None
+    try:      # the folder as the writer opens it: never through a link
+        dfd = os.open(str(AI_DIR), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        dfd = None
+    except OSError:
+        dfd, exists = None, True
+    if dfd is not None:
+        try:
+            exists, raw = _read_at(dfd, "settings.json", MAX_AI_FILE)
+        finally:
+            os.close(dfd)
+        if raw is not None:
+            try:
+                data = json.loads(raw.decode("utf-8"))
+            except (ValueError, RecursionError, UnicodeDecodeError):
+                data = None
     broken = exists and not isinstance(data, dict)
     values = data if isinstance(data, dict) else {}
     helper = values.get("helper")
@@ -650,6 +665,29 @@ def read_shared_ai() -> dict:
         "helper": helper if isinstance(helper, str) and (helper == "auto" or HELPER_ID_RE.match(helper)) else "auto",
         "web_search": values.get("web_search") is True,
     }
+
+
+def short_home(path: str) -> str:
+    """`~/…` for a path inside HOME (whole folder names only), else the path as it is."""
+    try:
+        rel = Path(path).relative_to(HOME)
+    except ValueError:
+        return path
+    return "~" if str(rel) == "." else f"~/{rel}"
+
+
+def with_current(values: list, labels: list, current, unknown_label) -> tuple[list, list, int]:
+    """Choices for a combo that always shows the saved value: when it is not among the offered
+    ones it is added (labelled by unknown_label(value)) and selected, so every offered value stays
+    a real change. An empty or missing current selects the first entry."""
+    values, labels = list(values), list(labels)
+    if current in values:
+        return values, labels, values.index(current)
+    if current in ("", None):
+        return values, labels, 0
+    values.append(current)
+    labels.append(unknown_label(current))
+    return values, labels, len(values) - 1
 
 
 def omarchy_default_agent() -> str:
@@ -890,18 +928,25 @@ def sw_audio(audio) -> dict:
     for dev in raw if isinstance(raw, list) else []:
         if not isinstance(dev, dict) or not isinstance(dev.get("name"), str) or not DEVICE_RE.match(dev["name"]):
             continue
-        if dev.get("ignored") is True:
-            continue
+        if dev.get("ignored") is True or dev.get("availability") in ("disconnected", "not available"):
+            continue        # Superwhisper refuses them, and its own panel leaves them out too
         devices.append({"name": dev["name"], "label": clean_text(dev.get("label") or dev.get("description"), 80)
                         or dev["name"], "selected": dev.get("selected") is True})
         if len(devices) >= 64:
             break
     use_default = config.get("useDefaultInputDevice") is True
     effective = _pick(audio, "effectiveDevice")
+    saved = config.get("audioInputDeviceId")
+    if use_default:
+        device = ""
+    elif isinstance(saved, str) and DEVICE_RE.match(saved):
+        device = saved          # may be unplugged now: the page shows it as such
+    else:
+        device = next((d["name"] for d in devices if d["selected"]), "")
     return {
         "devices": devices,
         "device_default": use_default,
-        "device": "" if use_default else next((d["name"] for d in devices if d["selected"]), ""),
+        "device": device,
         "effective": next((d["label"] for d in devices if d["name"] == effective), ""),
         "switches": ({"enableSoundEffects": config["enableSoundEffects"]}
                      if isinstance(config.get("enableSoundEffects"), bool) else {}),
@@ -1033,9 +1078,17 @@ def superwhisper_settings() -> tuple[bool, str]:
     return launch(["superwhisper", "settings"])
 
 
+SW_NOT_RUNNING = "Superwhisper is not running"
+
+
+def _sw_running() -> bool:
+    """Every superwhisper command starts its service, so each setter asks systemd first."""
+    return _service_active("superwhisper.service")
+
+
 def _sw_run(argv: list) -> tuple[bool, str]:
-    if not _service_active("superwhisper.service"):
-        return False, "Superwhisper is not running"
+    if not _sw_running():
+        return False, SW_NOT_RUNNING
     res = core.run(["superwhisper", *argv], timeout=20, max_bytes=1024 * 1024)
     return (True, "") if res.ok else (False, _err_text(res))
 
@@ -1044,6 +1097,8 @@ def sw_set_language(code: str) -> tuple[bool, str]:
     """Superwhisper's language; only a code its current `general show` offers."""
     if not isinstance(code, str) or not LANGUAGE_RE.match(code):
         return False, "invalid language"
+    if not _sw_running():
+        return False, SW_NOT_RUNNING
     offered = sw_general(_sw_json("general"))["languages"]
     if code not in [value for value, _label in offered]:
         return False, "Superwhisper does not offer this language"
@@ -1060,6 +1115,8 @@ def sw_select_microphone(name: str) -> tuple[bool, str]:
     """A microphone from `audio show`, or "" for the system default."""
     if not isinstance(name, str) or (name and not DEVICE_RE.match(name)):
         return False, "invalid microphone"
+    if not _sw_running():
+        return False, SW_NOT_RUNNING
     if name:
         devices = sw_audio(_sw_json("audio"))["devices"]
         if name not in [d["name"] for d in devices]:
@@ -1078,6 +1135,8 @@ def sw_select_mode(mode: str) -> tuple[bool, str]:
     """Processing mode, only one whose models are already downloaded (a download is GBs)."""
     if mode not in SW_MODES:
         return False, "invalid mode"
+    if not _sw_running():
+        return False, SW_NOT_RUNNING
     modes = sw_models(_sw_json("models"))["modes"]
     if not any(m["value"] == mode and m["ready"] for m in modes):
         return False, "this mode's models are not downloaded"

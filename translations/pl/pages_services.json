@@ -178,6 +178,8 @@
  "not set up yet (Use sets it up)": "jeszcze nieskonfigurowany (Użyj go skonfiguruje)",
  "timed out": "wygasło",
  "yesterday {0}": "wczoraj {0}",
+ "{0} (not connected)": "{0} (niepodłączony)",
+ "{0} (not offered now)": "{0} (teraz niedostępny)",
  "{0} (not ready)": "{0} (niegotowy)",
  "{0} GB": "{0} GB",
  "{0} is chosen but not installed.": "Wybrano {0}, ale nie jest zainstalowany.",

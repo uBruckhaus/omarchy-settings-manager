@@ -174,6 +174,8 @@
  "not set up yet (Use sets it up)": "aún sin configurar (Usar lo configura)",
  "timed out": "caducada",
  "yesterday {0}": "ayer {0}",
+ "{0} (not connected)": "{0} (no conectado)",
+ "{0} (not offered now)": "{0} (no disponible ahora)",
  "{0} (not ready)": "{0} (no listo)",
  "{0} GB": "{0} GB",
  "{0} is chosen but not installed.": "{0} está elegido pero no instalado.",

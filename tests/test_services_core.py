@@ -417,6 +417,23 @@ class SharedAiFileTests(TempHome):
         self.assertEqual(sc.set_helper("auto"), (True, ""))
         self.assertEqual(sc.set_helper("cursor-agent"), (True, ""))
 
+    def test_reader_refuses_a_linked_folder_like_the_writer(self):
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir(mode=0o700)
+        (elsewhere / "settings.json").write_text(json.dumps({"helper": "claude", "web_search": True}))
+        (self.root / "config").mkdir()
+        (self.root / "config/maprisma-ai").symlink_to(elsewhere)
+        shared = sc.read_shared_ai()
+        self.assertTrue(shared["broken"])
+        self.assertEqual((shared["helper"], shared["web_search"]), ("auto", False))
+        self.assertEqual(sc.set_web_search(False)[0], False)
+
+    def test_reader_missing_folder_or_file(self):
+        self.assertEqual(sc.read_shared_ai()["exists"], False)
+        (self.root / "config/maprisma-ai").mkdir(parents=True)
+        shared = sc.read_shared_ai()
+        self.assertEqual((shared["exists"], shared["broken"], shared["helper"]), (False, False, "auto"))
+
     def test_read_shared_ai_hostile_values(self):
         self.write("config/maprisma-ai/settings.json", json.dumps({"helper": "a b", "web_search": "true"}))
         shared = sc.read_shared_ai()
@@ -436,6 +453,10 @@ class HelperDetectionTests(TempHome):
         self.assertEqual(sc.catalog_helpers(), list(sc.SHIPPED_HELPERS))      # older than the snapshot
         self.write("usr/helpers.json", json.dumps({"version": True, "helpers": []}))
         self.assertEqual(sc.catalog_helpers(), list(sc.SHIPPED_HELPERS))
+
+    def test_snapshot_matches_maprisma_helpers_with_an_ask(self):
+        self.assertEqual([h[0] for h in sc.SHIPPED_HELPERS],
+                         ["claude", "codex", "agy", "cursor-agent", "copilot", "grok", "hermes", "omp", "openclaw", "pi"])
 
     def test_catalog_entries_are_checked(self):
         self.write("usr/helpers.json", json.dumps({"version": 3, "helpers": [
@@ -523,12 +544,34 @@ class HelperDetectionTests(TempHome):
         self.assertNotIn("pi:llama/small", states)
         self.assertTrue(states["agy"]["ready"])
         self.assertFalse(states["agy"]["verified"])
-        self.assertFalse(states["gemini"]["installed"])
+        self.assertFalse(states["grok"]["installed"])
+        self.assertNotIn("gemini", states)          # no one-shot `ask` in Maprisma's catalog
         helpers = list(states.values())
         self.assertEqual(sc.resolve_helper("auto", helpers), "claude")
         self.assertEqual(sc.resolve_helper("pi:llama/big", helpers), "pi:llama/big")
         self.assertEqual(sc.resolve_helper("codex", helpers), "claude")     # not ready: Automatic
         self.assertIsNone(sc.resolve_helper("auto", []))
+
+    def test_short_home_needs_a_folder_boundary(self):
+        home = str(self.root)
+        self.assertEqual(sc.short_home(home + "/.config/maprisma-ai/settings.json"), "~/.config/maprisma-ai/settings.json")
+        self.assertEqual(sc.short_home(home), "~")
+        self.assertEqual(sc.short_home(home + "-alt/.config/x"), home + "-alt/.config/x")
+        self.assertEqual(sc.short_home("/tmp" + home + "/cfg"), "/tmp" + home + "/cfg")
+
+    def test_with_current_keeps_the_saved_value_visible(self):
+        label = lambda v: f"{v} (gone)"  # noqa: E731
+        self.assertEqual(sc.with_current(["auto", "en"], ["Automatic", "English"], "en", label),
+                         (["auto", "en"], ["Automatic", "English"], 1))
+        values, labels, index = sc.with_current(["auto", "en"], ["Automatic", "English"], "ja", label)
+        self.assertEqual((values, labels, index), (["auto", "en", "ja"], ["Automatic", "English", "ja (gone)"], 2))
+        self.assertNotEqual(index, values.index("auto"))        # Automatic stays a real pick
+        self.assertEqual(sc.with_current(["auto"], ["Automatic"], "", label), (["auto"], ["Automatic"], 0))
+        self.assertEqual(sc.with_current(["auto"], ["Automatic"], None, label), (["auto"], ["Automatic"], 0))
+        self.assertEqual(sc.with_current(["", "mic"], ["Default", "Mic"], "", label)[2], 0)
+        original = ["a"]
+        sc.with_current(original, ["A"], "b", label)
+        self.assertEqual(original, ["a"])
 
     def test_omarchy_default_agent(self):
         self.assertEqual(sc.omarchy_default_agent(), "")
@@ -687,7 +730,36 @@ class VoiceTests(TempHome):
         with mock.patch.object(core, "run", run):
             self.assertEqual(sc.sw_set_tone("formal")[0], False)
             self.assertEqual(sc.sw_set_switch("launchAtLogin", False)[0], False)
-        self.assertFalse(any(c[0] == "superwhisper" and "set" in c for c in run.calls))
+            self.assertEqual(sc.sw_set_language("de")[0], False)
+            self.assertEqual(sc.sw_select_microphone("alsa_input.cam")[0], False)
+            self.assertEqual(sc.sw_select_microphone("")[0], False)
+            self.assertEqual(sc.sw_select_mode("cloud")[0], False)
+        # Every superwhisper command would start the stopped service: none may run.
+        self.assertEqual([c for c in run.calls if c[0] == "superwhisper"], [])
+        self.assertTrue(run.calls)
+
+    def test_unplugged_microphones_are_left_out(self):
+        audio = {"config": {"useDefaultInputDevice": False, "audioInputDeviceId": "alsa_input.dock"},
+                 "devices": [{"name": "alsa_input.usb-mic", "label": "USB Mic", "availability": "available"},
+                             {"name": "alsa_input.dock", "label": "Dock", "availability": "disconnected"},
+                             {"name": "alsa_input.line", "label": "Line", "availability": "not available"},
+                             {"name": "alsa_input.cam", "label": "Cam", "availability": "availability unknown"}]}
+        parsed = sc.sw_audio(audio)
+        self.assertEqual([d["name"] for d in parsed["devices"]], ["alsa_input.usb-mic", "alsa_input.cam"])
+        self.assertEqual(parsed["device"], "alsa_input.dock")        # the saved one, shown as not connected
+        run = Recorder({"systemctl --user is-active": ok(), "superwhisper audio show": ok(json.dumps(audio)),
+                        "superwhisper audio select": ok("{}")})
+        with mock.patch.object(core, "run", run):
+            self.assertEqual(sc.sw_select_microphone("alsa_input.dock")[0], False)
+            self.assertEqual(sc.sw_select_microphone("alsa_input.line")[0], False)
+            self.assertEqual(sc.sw_select_microphone("alsa_input.cam"), (True, ""))
+        self.assertEqual([c for c in run.calls if c[:3] == ["superwhisper", "audio", "select"]],
+                         [["superwhisper", "audio", "select", "alsa_input.cam"]])
+        hostile = sc.sw_audio({"config": {"useDefaultInputDevice": False, "audioInputDeviceId": "-x; rm"},
+                               "devices": [{"name": "alsa_input.a", "selected": True}]})
+        self.assertEqual(hostile["device"], "alsa_input.a")
+        self.assertEqual(sc.sw_audio({"config": {"useDefaultInputDevice": True, "audioInputDeviceId": "alsa_input.a"},
+                                      "devices": []})["device"], "")
 
 
 if __name__ == "__main__":

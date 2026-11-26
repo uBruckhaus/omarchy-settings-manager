@@ -180,21 +180,27 @@ class ServicesPages(PageGroup):
         run_async(self.app, worker, after, busy_text=busy)
 
     def _switch(self, title: str, subtitle: str, active: bool, on_change) -> Adw.SwitchRow:
-        """A switch that calls on_change(want, revert) once per user change."""
+        """A switch that calls on_change(want, finish) once per user change. It stays insensitive
+        while the change is in flight (no second, overlapping change); finish(value=None) sets it
+        back to value when given and makes it usable again. A change that reloads the page needs
+        no finish: the reload builds a new switch."""
         row = Adw.SwitchRow(title=escape(title), active=active)
         if subtitle:
             row.set_subtitle(escape(subtitle))
             row.set_subtitle_lines(4)
         quiet = [False]
 
-        def revert(value: bool):
-            quiet[0] = True
-            row.set_active(value)
-            quiet[0] = False
+        def finish(value: bool | None = None):
+            if value is not None:
+                quiet[0] = True
+                row.set_active(value)
+                quiet[0] = False
+            row.set_sensitive(True)
 
         def changed(_row, _pspec):
             if not quiet[0]:
-                on_change(row.get_active(), revert)
+                row.set_sensitive(False)
+                on_change(row.get_active(), finish)
 
         row.connect("notify::active", changed)
         return row
@@ -217,13 +223,13 @@ class ServicesPages(PageGroup):
         key = "notifications"
         groups = []
 
-        quiet = Adw.PreferencesGroup(title=_("Do not disturb"))
+        quiet = Adw.PreferencesGroup(title=escape(_("Do not disturb")))
         dnd = self._switch(
             _("Do not disturb"),
             _("No popups; notifications still go to the history. Verification codes, critical alerts from "
               "scripts and Omarchy's own messages still show."),
             bool(data.get("dnd")),
-            lambda want, revert: self._set_dnd(want, revert))
+            lambda want, finish: self._set_dnd(want, finish))
         dnd.set_sensitive(bool(data.get("shell")))
         quiet.add(dnd)
         if not data.get("shell"):
@@ -236,7 +242,7 @@ class ServicesPages(PageGroup):
         quiet.add(test)
         groups.append(quiet)
 
-        screen = Adw.PreferencesGroup(title=_("On screen and history"))
+        screen = Adw.PreferencesGroup(title=escape(_("On screen and history")))
         count = data.get("on_screen")
         if data.get("shell") and isinstance(count, int):
             on_screen = _row(_("On screen now"), ngettext("{0} notification", "{0} notifications", count).format(count))
@@ -275,12 +281,12 @@ class ServicesPages(PageGroup):
         groups.append(screen)
 
         if data.get("crash_tools"):
-            crash = Adw.PreferencesGroup(title=_("Crash notifications"))
+            crash = Adw.PreferencesGroup(title=escape(_("Crash notifications")))
             crash.add(self._switch(
                 _("Notify when a program crashes"),
                 _("Omarchy's crash watcher announces each crash with its details."),
                 bool(data.get("crash_capture")),
-                lambda want, revert: self._act(key, lambda: sc.set_crash_capture(want), _("Switching…"),
+                lambda want, _finish: self._act(key, lambda: sc.set_crash_capture(want), _("Switching…"),
                                                fail_text=_("Could not switch crash notifications."))))
             for name in data.get("crash_muted") or []:
                 muted = _row(name, _("Muted: its crashes don't notify."))
@@ -303,7 +309,7 @@ class ServicesPages(PageGroup):
 
         reminders = data.get("reminders") if isinstance(data.get("reminders"), dict) else {}
         if reminders.get("available"):
-            group = Adw.PreferencesGroup(title=_("Reminders"))
+            group = Adw.PreferencesGroup(title=escape(_("Reminders")))
             items = reminders.get("items") or []
             for item in items:
                 minutes = max(1, (int(item.get("remaining") or 0) + 59) // 60)
@@ -332,7 +338,7 @@ class ServicesPages(PageGroup):
             group.add(set_row)
             groups.append(group)
 
-        keys = Adw.PreferencesGroup(title=_("Keys"), description=escape(_("Omarchy's default notification keys.")))
+        keys = Adw.PreferencesGroup(title=escape(_("Keys")), description=escape(_("Omarchy's default notification keys.")))
         for combo, what in (
             ("Super + ,", _("Dismiss, click or focus the newest notification")),
             ("Super + Alt + ,", _("Dismiss the newest notification")),
@@ -347,13 +353,14 @@ class ServicesPages(PageGroup):
         groups.append(keys)
         return groups
 
-    def _set_dnd(self, want: bool, revert) -> None:
+    def _set_dnd(self, want: bool, finish) -> None:
         def after(result):
             ok, err = _unpack(result)
             if ok:
+                finish()
                 self.app.toast(_("Do not disturb is on.") if want else _("Do not disturb is off."))
             else:
-                revert(not want)
+                finish(not want)
                 self.app.toast(f"{_('Could not switch Do not disturb.')} {err}".strip())
 
         run_async(self.app, lambda: sc.set_dnd(want), after)
@@ -370,16 +377,15 @@ class ServicesPages(PageGroup):
         resolved = data.get("resolved")
         ready = [h for h in helpers if h.get("ready")]
 
-        group = Adw.PreferencesGroup(title=_("Helper"))
+        group = Adw.PreferencesGroup(title=escape(_("Helper")))
         auto_label = _("Automatic ({0})").format(names.get(ready[0]["id"], ready[0]["id"])) if ready else _("Automatic")
         values, labels = ["auto"], [auto_label]
         for helper in ready:
             values.append(helper["id"])
             labels.append(helper["name"] + ("" if helper.get("verified") else " " + _("(untested)")))
-        if choice not in values:
-            values.append(choice)
-            labels.append(_("{0} (not ready)").format(names.get(choice, choice)))
-        combo = _combo(_("AI helper for all Maprisma apps"), labels, values.index(choice),
+        values, labels, index = sc.with_current(values, labels, choice,
+                                                lambda c: _("{0} (not ready)").format(names.get(c, c)))
+        combo = _combo(_("AI helper for all Maprisma apps"), labels, index,
                        _("Maprisma Launcher, Theme, Playground, Notifier, Mail and the AI updates of Maprisma "
                          "Settings use it. Automatic picks the first ready helper that can do the job."))
         combo.set_sensitive(not shared.get("broken"))
@@ -398,17 +404,17 @@ class ServicesPages(PageGroup):
             group.add(_dim_row(_("{0} is not installed or not ready here, so Automatic is used.").format(
                 names.get(choice, choice))))
         else:
-            group.add(_dim_row(_("Saved in {0}").format(path.replace(str(sc.HOME), "~", 1))))
+            group.add(_dim_row(_("Saved in {0}").format(sc.short_home(path))))
         groups.append(group)
 
-        web = Adw.PreferencesGroup(title=_("Web search"))
+        web = Adw.PreferencesGroup(title=escape(_("Web search")))
         web_row = self._switch(
             _("Let the AI helper search the web"),
             _("When an app can't find something, for example an app to install, the helper may search the web "
               "and read pages, nothing else. The app checks the results before it offers anything. Off until "
               "you turn it on."),
             bool(shared.get("web_search")),
-            lambda want, revert: self._act(key, lambda: sc.set_web_search(want), _("Saving…"),
+            lambda want, _finish: self._act(key, lambda: sc.set_web_search(want), _("Saving…"),
                                            fail_text=_("Could not save web search.")))
         web_row.set_sensitive(not shared.get("broken"))
         web.add(web_row)
@@ -419,7 +425,7 @@ class ServicesPages(PageGroup):
                            "provider. It gets no other tools: no commands, no files.")))
         groups.append(web)
 
-        found = Adw.PreferencesGroup(title=_("Helpers on this PC"),
+        found = Adw.PreferencesGroup(title=escape(_("Helpers on this PC")),
                                      description=escape(_("Found by their programs and sign-in files; none of them "
                                                           "was started.")))
         missing = []
@@ -449,7 +455,7 @@ class ServicesPages(PageGroup):
             found.add(expander)
         groups.append(found)
 
-        omarchy = Adw.PreferencesGroup(title=_("Omarchy and its plugins"))
+        omarchy = Adw.PreferencesGroup(title=escape(_("Omarchy and its plugins")))
         agent = str(data.get("omarchy_agent_name") or "")
         agent_row = _row(_("Omarchy's default coding agent"),
                          _("Used by Omarchy's agent key and crash diagnosis. Change it in the Omarchy menu under "
@@ -471,7 +477,7 @@ class ServicesPages(PageGroup):
         backend = str(data.get("backend") or "")
         titles = {"superwhisper": "Superwhisper", "voxtype": "Voxtype"}
 
-        group = Adw.PreferencesGroup(title=_("Dictation"))
+        group = Adw.PreferencesGroup(title=escape(_("Dictation")))
         if not backend:
             state = _("No backend chosen yet: install one below.")
         elif data.get("ready"):
@@ -488,7 +494,7 @@ class ServicesPages(PageGroup):
             group.add(test)
         groups.append(group)
 
-        choose = Adw.PreferencesGroup(title=_("Backends"),
+        choose = Adw.PreferencesGroup(title=escape(_("Backends")),
                                       description=escape(_("Install and Remove open Omarchy's own command in a "
                                                            "terminal; it asks for your password there.")))
         blurbs = {
@@ -536,7 +542,7 @@ class ServicesPages(PageGroup):
 
     def _superwhisper_group(self, info: dict) -> Adw.PreferencesGroup:
         key = "voice"
-        group = Adw.PreferencesGroup(title="Superwhisper")
+        group = Adw.PreferencesGroup(title=escape("Superwhisper"))
         details = info.get("details") if isinstance(info.get("details"), dict) else None
         open_btn = _button(_("Open settings"), lambda: self._act(key, sc.superwhisper_settings, _("Opening…"),
                                                                 refresh=False))
@@ -571,10 +577,10 @@ class ServicesPages(PageGroup):
 
         languages = details.get("languages") or []
         if languages:
-            values = [v for v, _label in languages]
-            labels = [_("Automatic") if v == "auto" else label for v, label in languages]
-            current = details.get("language") if details.get("language") in values else values[0]
-            row = _combo(_("Language"), labels, values.index(current),
+            values, labels, index = sc.with_current(
+                [v for v, _label in languages], [_("Automatic") if v == "auto" else label for v, label in languages],
+                details.get("language"), lambda code: _("{0} (not offered now)").format(code))
+            row = _combo(_("Language"), labels, index,
                          _("An offline mode dictates in English when it does not know the language."))
             self._on_combo(row, values, lambda code: sw_act(lambda: sc.sw_set_language(code)))
             group.add(row)
@@ -587,11 +593,12 @@ class ServicesPages(PageGroup):
 
         devices = details.get("devices") or []
         effective = details.get("effective") or ""
-        values = [""] + [d["name"] for d in devices]
-        labels = [_("System default ({0})").format(effective) if effective and details.get("device_default")
-                  else _("System default")] + [d["label"] for d in devices]
-        current = details.get("device") if details.get("device") in values else ""
-        row = _combo(_("Microphone"), labels, values.index(current))
+        values, labels, index = sc.with_current(
+            [""] + [d["name"] for d in devices],
+            [_("System default ({0})").format(effective) if effective and details.get("device_default")
+             else _("System default")] + [d["label"] for d in devices],
+            details.get("device") or "", lambda name: _("{0} (not connected)").format(name))
+        row = _combo(_("Microphone"), labels, index)
         self._on_combo(row, values, lambda name: sw_act(lambda: sc.sw_select_microphone(name)))
         group.add(row)
 
@@ -603,7 +610,7 @@ class ServicesPages(PageGroup):
         ):
             if setting in switches:
                 group.add(self._switch(title, subtitle, bool(switches[setting]),
-                                       lambda want, revert, s=setting: sw_act(lambda: sc.sw_set_switch(s, want))))
+                                       lambda want, _finish, s=setting: sw_act(lambda: sc.sw_set_switch(s, want))))
 
         shortcuts = details.get("shortcuts") or {}
         parts = [f"{label}: {shortcuts.get(name) or _('none')}" for name, label in
@@ -616,7 +623,7 @@ class ServicesPages(PageGroup):
 
     def _voxtype_group(self, info: dict) -> Adw.PreferencesGroup:
         key = "voice"
-        group = Adw.PreferencesGroup(title="Voxtype",
+        group = Adw.PreferencesGroup(title=escape("Voxtype"),
                                      description=escape(_("Read only here; its settings open in a terminal, and "
                                                           "Omarchy restarts the shell when that terminal closes.")))
         details = info.get("details") if isinstance(info.get("details"), dict) else {}
