@@ -145,9 +145,12 @@ class ParserTests(unittest.TestCase):
                 "Upper 1 -> 2\n"
                 "noarrow 1 2\n"
                 ":: Synchronizing package databases...\n"
+                "artcraft-launcher 0.20.1-1 -> 0.20.3-1 [1h11m]\n"     # yay's age note
+                "held-bin 1 -> 2 [ignored]\n"
                 + "x" * 500 + " 1 -> 2\n")
         self.assertEqual(ac.parse_update_lines(text), {"firefox": ("120.0-1", "121.0-1"),
-                                                       "nordvpn-bin": ("6.1.0-1", "6.1.1-1")})
+                                                       "nordvpn-bin": ("6.1.0-1", "6.1.1-1"),
+                                                       "artcraft-launcher": ("0.20.1-1", "0.20.3-1")})
         self.assertEqual(ac.parse_update_lines(""), {})
         self.assertEqual(ac.parse_update_lines(None), {})
 
@@ -225,6 +228,20 @@ class ScanTests(Sandbox):
         self.assertNotIn("c.desktop", entries)
         self.assertNotIn("big.desktop", entries)
         self.assertEqual(set(entries), {"a.desktop"})
+
+    def test_launcher_names_with_spaces(self):
+        maps = self.write(self.user_apps / "Google Maps.desktop",
+                          desktop("Google Maps", "omarchy-launch-webapp https://maps.google.com"))
+        self.write(self.user_apps / "bad;name.desktop", desktop("Bad", "x"))
+        self.write(self.user_apps / "-rf.desktop", desktop("Bad", "x"))
+        entries = {e["id"]: e for e in ac.scan_desktop_entries()}
+        self.assertEqual(set(entries), {"Google Maps.desktop"})
+        entry = entries["Google Maps.desktop"]
+        self.assertEqual(ac.open_argv(entry), ["uwsm-app", "-t", "service", "--", str(maps)])
+        self.assertEqual(ac.open_argv({**entry, "path": str(self.user_apps / "Other.desktop")}), None)
+        self.assertTrue(ac.valid_entry_id("Apple TV (4K).desktop"))
+        self.assertFalse(ac.valid_entry_id("../x.desktop"))
+        self.assertFalse(ac.valid_entry_id("a/b.desktop"))
 
     def test_symlinked_desktop_files(self):
         target = self.write(self.root / "elsewhere/real.desktop", desktop("Real", "real"))
@@ -477,7 +494,7 @@ class CommandTests(Sandbox):
                 self.code = code
 
             def wait(self, timeout=None):
-                if self.code is None:
+                if self.code is None and timeout is not None:
                     raise ac.subprocess.TimeoutExpired("x", timeout)
                 return self.code
 
@@ -615,8 +632,16 @@ class ReleaseTests(Sandbox):
         tampered["appimage"]["sha256"] = "zz"
         self.assertIsNone(ac.install_command("maprisma/theme", tampered))
         self.assertIsNone(ac.install_command("maprisma/theme", None))
+        self.assertIsNone(ac.install_command("maprisma/..", release))
+        self.assertIsNone(ac.install_command("maprisma/theme", {**release, "tag": ".."}))
         self.write(self.applications / "Maprisma-Theme-0.7.2-x86_64.AppImage", b"x")
         self.assertIsNone(ac.install_command("maprisma/theme", release))          # never over a file
+        other = self.root / "other-apps"
+        other.mkdir()
+        link = self.root / "linked-Applications"
+        os.symlink(other, link)
+        with mock.patch.object(ac, "APPLICATIONS", link):
+            self.assertIsNone(ac.install_command("maprisma/theme", release))      # a linked ~/Applications
 
 
 class MaprismaAppsTests(Sandbox):
@@ -665,6 +690,19 @@ class MaprismaAppsTests(Sandbox):
         self.assertEqual(data["settings_program"], str(lib / "maprisma-settings"))
         self.assertIn("launcher", {a["key"] for a in data["available"]})
         self.assertEqual(ac.maprisma_settings_argv(data["settings_program"])[-2:], ["--page", "apps"])
+
+    def test_settings_found_only_by_its_launcher_link(self):
+        real = self.write(self.root / "opt/maprisma-settings/maprisma-settings", b"ELF", 0o755)
+        os.symlink(real, self.local_bin / "maprisma-settings")
+        self.write(self.user_apps / "com.maprisma.Settings.desktop",
+                   desktop("Maprisma Settings", str(self.local_bin / "maprisma-settings"), "/abs/icon.png"))
+        self.tools.discard("pacman")
+        data = ac.read_maprisma_apps()
+        self.assertIn("icons", data)
+        program = data["settings_program"]
+        self.assertTrue(program)
+        self.assertEqual(ac.maprisma_settings_argv(program),
+                         ["uwsm-app", "-t", "service", "--", str(real), "--page", "apps"])
 
     def test_pacman_install_and_symlinked_lib_folder(self):
         self.fake.table[("pacman", "-Q", "--")] = core.Result(0, "maprisma-bin 2.2.0-1\n")

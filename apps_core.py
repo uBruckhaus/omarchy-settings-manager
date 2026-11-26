@@ -74,7 +74,8 @@ TAG_RE = re.compile(r"\A[A-Za-z0-9_.-]{1,100}\Z")
 ASSET_RE = re.compile(r"\A[A-Za-z0-9_.+-]{1,200}\.AppImage\Z")
 SHA256_RE = re.compile(r"\A[0-9a-f]{64}\Z")
 NUMERIC_VERSION_RE = re.compile(r"v?(\d+(?:\.\d+)+)")
-_UPDATE_LINE_RE = re.compile(r"\A([a-z0-9@_+][a-z0-9@._+-]{0,127}) (\S{1,64}) -> (\S{1,64})\Z")
+# yay/paru may add a bracketed note ("[1h11m]", "[ignored]"); ignored packages are left out.
+_UPDATE_LINE_RE = re.compile(r"\A([a-z0-9@_+][a-z0-9@._+-]{0,127}) (\S{1,64}) -> (\S{1,64})(?:\s+\[([^\]]{1,40})\])?\Z")
 _OWNER_LINE_RE = re.compile(r"\A(/.{1,1024}) is owned by ([a-z0-9@_+][a-z0-9@._+-]{0,127}) (\S{1,64})\Z")
 _PKG_LINE_RE = re.compile(r"\A([a-z0-9@_+][a-z0-9@._+-]{0,127}) (\S{1,64})\Z")
 _INFO_LINE_RE = re.compile(r"\A([A-Za-z][A-Za-z ]{0,40}?)\s*:\s?(.*)\Z")
@@ -102,6 +103,15 @@ def valid_launcher_name(name) -> bool:
     """A web app or TUI launcher name as Omarchy's remove scripts take it (the .desktop file's
     name without the extension): no path parts, nothing a shell or `rm` could read as more."""
     return isinstance(name, str) and bool(WEBAPP_NAME_RE.match(name)) and ".." not in name
+
+
+def valid_entry_id(desktop_id) -> bool:
+    """A desktop id as system_core accepts it, or a top-level launcher whose name has spaces and the
+    like (Omarchy names web apps "Google Maps.desktop")."""
+    if system_core.valid_desktop_id(desktop_id):
+        return True
+    return isinstance(desktop_id, str) and desktop_id.endswith(".desktop") \
+        and valid_launcher_name(desktop_id[:-len(".desktop")])
 
 
 def _which(tool: str) -> str | None:
@@ -285,7 +295,7 @@ def scan_desktop_entries(dirs: list[Path] | None = None) -> list[dict]:
                 except ValueError:
                     continue
                 desktop_id = rel.replace("/", "-")
-                if desktop_id in seen or not system_core.valid_desktop_id(desktop_id):
+                if desktop_id in seen or not valid_entry_id(desktop_id):
                     continue
                 st = _lstat(full)
                 if st is None:
@@ -357,7 +367,7 @@ def parse_update_lines(text: str) -> dict:
     out = {}
     for line in (text or "").splitlines():
         match = _UPDATE_LINE_RE.match(line.strip())
-        if match:
+        if match and (match.group(4) or "").strip().lower() != "ignored":
             out[match.group(1)] = (match.group(2), match.group(3))
     return out
 
@@ -770,12 +780,19 @@ def update_command(source: str, flatpak_id: str = "") -> list[str] | None:
 
 
 def open_argv(app: dict, extra: tuple = ()) -> list[str] | None:
-    """Start the app as its own user service (uwsm-app): by desktop id, else an AppImage file."""
+    """Start the app as its own user service (uwsm-app): by desktop id (a launcher with spaces in its
+    name by its file), else a program or AppImage file (a link counts as its target)."""
     desktop_id = app.get("id") or ""
-    if desktop_id and system_core.valid_desktop_id(desktop_id) and not extra:
-        return ["uwsm-app", "-t", "service", "--", desktop_id]
+    if desktop_id and not extra:
+        if system_core.valid_desktop_id(desktop_id):
+            return ["uwsm-app", "-t", "service", "--", desktop_id]
+        path = app.get("path") or ""
+        if valid_entry_id(desktop_id) and path.startswith("/") and _safe_arg(path) and _regular_file(Path(path)) \
+                and os.path.basename(path) == desktop_id:
+            return ["uwsm-app", "-t", "service", "--", path]
     target = app.get("file") or app.get("program") or ""
-    if target and target.startswith("/") and _safe_arg(target) and _regular_file(Path(target)) \
+    target = _real(target) if target.startswith("/") else ""
+    if target and _safe_arg(target) and _regular_file(Path(target)) \
             and os.access(target, os.X_OK) and all(_safe_arg(e) for e in extra):
         return ["uwsm-app", "-t", "service", "--", target, *extra]
     return None
@@ -995,9 +1012,11 @@ def read_maprisma_apps() -> dict:
         app["running"] = _is_running(procs, program, app["folder"] if app["how"] == "tarball" else "")
         installed.append(app)
     installed.sort(key=lambda a: a["name"].casefold())
-    settings = next((a for a in installed if a["key"] == "settings" and a["program"]), None)
+    settings = next((a for a in installed if a["key"] == "settings" and a["program"]
+                     and maprisma_settings_argv(a["program"]) is not None), None)
     return {"ok": True, "installed": installed, "available": available,
-            "settings_program": settings["program"] if settings else ""}
+            "settings_program": settings["program"] if settings else "",
+            "icons": read_icon_files(installed)}
 
 
 # GitHub's latest release per repo, cached in this process (the Launcher does the same): a page
@@ -1096,11 +1115,13 @@ INSTALL_SCRIPT = ("set -eu; "
 
 def install_command(repo: str, release: dict | None) -> list[str] | None:
     """The terminal command that installs a catalog app's release AppImage into ~/Applications."""
-    if not isinstance(repo, str) or not SLUG_RE.match(repo) or not isinstance(release, dict):
+    if not isinstance(repo, str) or not SLUG_RE.match(repo) or ".." in repo or not isinstance(release, dict):
         return None
     image = release.get("appimage")
     tag = release.get("tag")
-    if not isinstance(image, dict) or not isinstance(tag, str) or not TAG_RE.match(tag):
+    if not isinstance(image, dict) or not isinstance(tag, str) or not TAG_RE.match(tag) or tag in (".", ".."):
+        return None
+    if APPLICATIONS.is_symlink() or (APPLICATIONS.exists() and not APPLICATIONS.is_dir()):
         return None
     name, url, sha = image.get("name"), image.get("url"), image.get("sha256")
     if not isinstance(name, str) or not ASSET_RE.match(name) or not isinstance(sha, str) or not SHA256_RE.match(sha):

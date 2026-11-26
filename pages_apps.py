@@ -96,7 +96,7 @@ class AppsPages(PageGroup):
 
     def build(self, stack: Gtk.Stack, key: str) -> None:
         top = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        top.append(make_header_row(self.description(key), lambda k=key: self.refresh(k)))
+        top.append(make_header_row(self.description(key), lambda k=key: self.refresh_clicked(k)))
         search = Gtk.SearchEntry(placeholder_text=_("Type to filter"), hexpand=True)
         search.connect("search-changed", lambda *_a, k=key: self.render(k))
         top.append(search)
@@ -107,6 +107,12 @@ class AppsPages(PageGroup):
         top.append(status)
         self.status[key] = status
         self.lists[key] = self.add_page(stack, key, top)
+
+    def refresh_clicked(self, key: str) -> None:
+        """The Refresh button: asks the update tools again even within UPDATE_RECHECK_SECONDS."""
+        if key == "system_apps":
+            self.updates_at = 0.0
+        self.refresh(key)
 
     def load(self, key: str, gen: int) -> None:
         box = self.lists[key]
@@ -137,7 +143,7 @@ class AppsPages(PageGroup):
     # --- network checks ----------------------------------------------------------------------
 
     def check_updates(self) -> None:
-        if self.checking_updates or (self.updates is not None
+        if self.checking_updates or (self.updates is not None and self.updates_at
                                      and time.monotonic() - self.updates_at < UPDATE_RECHECK_SECONDS):
             self._set_update_status()
             return
@@ -425,18 +431,22 @@ class AppsPages(PageGroup):
         return len({*(self.updates.get("pacman") or {}), *(self.updates.get("aur") or {})})
 
     def _update_of(self, app: dict) -> tuple | None:
-        """(installed, available) when an update is known for the app."""
+        """(installed, available) when an update is known for the app and the app isn't at that
+        version already (the list may be newer than the last check)."""
         if not self.updates:
             return None
         source = app.get("source")
-        if source == "pacman":
-            return (self.updates.get("pacman") or {}).get(app.get("package"))
-        if source == "aur":
-            return (self.updates.get("aur") or {}).get(app.get("package")) or \
-                (self.updates.get("pacman") or {}).get(app.get("package"))
+        if source in ("pacman", "aur"):
+            pair = (self.updates.get("aur") or {}).get(app.get("package")) if source == "aur" else None
+            pair = pair or (self.updates.get("pacman") or {}).get(app.get("package"))
+            if pair and app.get("version") and app["version"] == pair[1]:
+                return None
+            return pair
         if source == "flatpak":
             new = (self.updates.get("flatpak") or {}).get(app.get("flatpak"))
-            return (app.get("version") or "?", new or "?") if new is not None else None
+            if new is None or (new and app.get("version") == new):
+                return None
+            return (app.get("version") or "?", new or "?")
         return None
 
     def render_system(self) -> None:
@@ -513,8 +523,7 @@ class AppsPages(PageGroup):
         items.append((_("Details…"), lambda: self.system_details(app), ()))
         if self._update_of(app):
             if app["source"] == "flatpak":
-                items.append((_("Update"), lambda: self.terminal(apps_core.update_command("flatpak", app["flatpak"]),
-                                                                  _("A terminal updates {0}.").format(app["name"])), ()))
+                items.append((_("Update…"), lambda: self.confirm_flatpak_update(app), ()))
             else:
                 items.append((_("Update the system…"), lambda: self.confirm_update_all(app["source"]), ()))
         if app.get("id") and app.get("path") and system_core.valid_desktop_id(app["id"]):
@@ -597,6 +606,15 @@ class AppsPages(PageGroup):
         self.confirm(_("Update all?"), body, _("Update all"),
                      lambda: self.terminal(command, _("A terminal runs the update.")))
 
+    def confirm_flatpak_update(self, app: dict) -> None:
+        command = apps_core.update_command("flatpak", app.get("flatpak", ""))
+        if command is None:
+            return
+        body = _("Opens a terminal with flatpak update {0}; it shows what it will update and asks before it "
+                 "starts.").format(app["flatpak"])
+        self.confirm(_("Update {0}?").format(app["name"]), body, _("Update"),
+                     lambda: self.terminal(command, _("A terminal updates {0}.").format(app["name"])))
+
     def confirm_uninstall(self, app: dict) -> None:
         command = apps_core.uninstall_command(app)
         if command is None:
@@ -607,7 +625,7 @@ class AppsPages(PageGroup):
 
             def ready(needed):
                 others = [a["name"] for a in self._all_system_apps()
-                          if a.get("package") == package and a is not app]
+                          if a.get("package") == package and a.get("key") != app.get("key")]
                 body = _("Opens a terminal with omarchy-pkg-drop {0}: pacman removes the package with the "
                          "dependencies nothing else needs (pacman -Rns), and asks for your password there.").format(package)
                 if others:
@@ -652,11 +670,12 @@ class AppsPages(PageGroup):
                      lambda: self.trash(files, key, _("{0} is in the trash.").format(app["name"])), destructive=True)
 
     def confirm_trash_older(self, app: dict, key: str) -> None:
-        files = [o["path"] for o in app.get("older") or [] if apps_core.trashable(o["path"], apps_core.APPIMAGE_DIRS)]
+        kept = [o for o in app.get("older") or [] if apps_core.trashable(o["path"], apps_core.APPIMAGE_DIRS)]
+        files = [o["path"] for o in kept]
         if not files:
             return
-        size = sum(o.get("size", 0) for o in app.get("older") or [])
-        body = _("The older copies of {0} go to the trash ({1}); the newest stays:").format(
+        size = sum(o.get("size", 0) for o in kept)
+        body = _("These copies of {0} go to the trash ({1}); the one in use stays:").format(
             app["name"], format_bytes(size)) + "\n" + "\n".join(os.path.basename(f) for f in files[:15])
         if len(files) > 15:
             body += "\n" + _("… and {0} more").format(len(files) - 15)
@@ -681,6 +700,8 @@ class AppsPages(PageGroup):
         run_async(self.app, lambda: apps_core.launch(argv), done, busy_text=busy)
 
     def terminal(self, command, done_text: str) -> None:
+        self.updates_at = 0.0          # the next load asks the update tools again
+
         def done(result):
             ok, err = _pair(result)
             self.app.toast(done_text + " " + _("Refresh the page when it is done.") if ok
@@ -705,7 +726,12 @@ class AppsPages(PageGroup):
         desktop_id = app["id"]
 
         def work():
-            return system_core.add_autostart(desktop_id) if on else system_core.remove_autostart(desktop_id)
+            if not on:
+                return system_core.remove_autostart(desktop_id)
+            result = system_core.add_autostart(desktop_id)
+            if result == (False, "already in autostart"):     # switched off there (Hidden=true): on again
+                return system_core.toggle_autostart(desktop_id, True)
+            return result
 
         def done(result):
             ok, err = _pair(result)
