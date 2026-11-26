@@ -85,5 +85,38 @@ class SidebarAndArgsTests(unittest.TestCase):
         self.assertEqual(sm.parse_args(["--toggle"])["toggle"], True)
 
 
+class MaprismaSectionTests(unittest.TestCase):
+    def test_switch_on_by_default_and_detection(self):
+        import tempfile
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            settings = home / "settings.json"
+            with mock.patch.object(Path, "home", return_value=home), \
+                    mock.patch.object(sm, "SETTINGS_FILE", settings):
+                self.assertTrue(sm.load_settings()["show_maprisma"])
+                settings.write_text('{"show_maprisma": false}')
+                self.assertFalse(sm.load_settings()["show_maprisma"])
+                apps = home / ".local/share/applications"
+                apps.mkdir(parents=True)
+                (apps / "com.maprisma.Settings.desktop").write_text("[Desktop Entry]\n")
+                self.assertTrue(sm.maprisma_installed())
+        self.assertEqual(set(sm.MAPRISMA_PAGES), {"apps", "ai"})
+
+    def test_pages_show_only_when_switched_on_and_detected(self):
+        class Fake:
+            page_hidden = sm.SettingsManager.page_hidden
+            sidebar_pages = sm.SettingsManager.sidebar_pages
+        order = sm.normalize_sidebar_order(None)
+        for show, found, visible in ((True, True, True), (True, False, False), (False, True, False)):
+            fake = Fake()
+            fake.settings = {"show_maprisma": show, "sidebar_order": order}
+            fake._maprisma_found = found
+            pages = fake.sidebar_pages()
+            self.assertEqual("apps" in pages, visible, (show, found))
+            self.assertEqual("ai" in pages, visible, (show, found))
+            self.assertIn("system_apps", pages)
+
+
 if __name__ == "__main__":
     unittest.main()

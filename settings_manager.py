@@ -89,6 +89,20 @@ PAGES = (
 PAGE_MAP = {key: (key, title, icon) for key, title, icon in PAGES}
 PAGE_KEYS = tuple(key for key, _title, _icon in PAGES)
 SEPARATOR = "---"
+MAPRISMA_PAGES = ("apps", "ai")     # the optional Maprisma section (Settings › "Show the Maprisma pages")
+
+
+def maprisma_installed() -> bool:
+    """A Maprisma app on this PC: a com.maprisma.* launcher or the shared Maprisma AI settings."""
+    home = Path.home()
+    folders = (home / ".local/share/applications", Path("/usr/share/applications"))
+    try:
+        if any(any(f.glob("com.maprisma.*.desktop")) for f in folders if f.is_dir()):
+            return True
+    except OSError:
+        pass
+    return (home / ".config/maprisma-ai").is_dir()
+
 DEFAULT_SIDEBAR_ORDER = [
     "plugins", "bar", "updates", "apps", "system_apps", SEPARATOR,
     "network", "bluetooth", "appearance", "theme", "displays", "sound", "notifications", "ai", "voice",
@@ -146,6 +160,7 @@ def load_settings() -> dict:
             "show_builtin": data.get("show_builtin") is True,
             "corners": corners.choice(data.get("corners")),
             "screenshot_key": data.get("screenshot_key", True) is not False,
+            "show_maprisma": data.get("show_maprisma", True) is not False,
             "sidebar_order": normalize_sidebar_order(data.get("sidebar_order"))}
 
 
@@ -331,8 +346,18 @@ class SettingsManager(Adw.Application):
 
     # --- sidebar -------------------------------------------------------------------------------
 
+    def page_hidden(self, key: str) -> bool:
+        """The Maprisma pages show while the switch is on (default) and a Maprisma app is installed."""
+        if key not in MAPRISMA_PAGES:
+            return False
+        if not self.settings.get("show_maprisma", True):
+            return True
+        if getattr(self, "_maprisma_found", None) is None:
+            self._maprisma_found = maprisma_installed()
+        return not self._maprisma_found
+
     def sidebar_pages(self) -> list[str]:
-        return [item for item in self.settings["sidebar_order"] if item in PAGE_MAP]
+        return [item for item in self.settings["sidebar_order"] if item in PAGE_MAP and not self.page_hidden(item)]
 
     def rebuild_sidebar(self):
         if self._sidebar_popover is not None:
@@ -342,7 +367,13 @@ class SettingsManager(Adw.Application):
         clear(self.sidebar)
         self.sidebar_rows = {}
         order = self.settings["sidebar_order"]
+        last_shown = SEPARATOR          # no separator first or twice in a row once pages are hidden
         for idx, item in enumerate(order):
+            if item != SEPARATOR and self.page_hidden(item):
+                continue
+            if item == SEPARATOR and (last_shown == SEPARATOR or idx == len(order) - 1):
+                continue
+            last_shown = item
             if item == SEPARATOR:
                 row = Gtk.ListBoxRow(selectable=False, activatable=False, css_classes=["sm-sep"])
                 row.page = ""
@@ -541,6 +572,8 @@ class SettingsManager(Adw.Application):
     def show_page(self, key: str):
         if key != "detail" and key not in PAGE_MAP:
             return
+        if self.page_hidden(key):
+            key = "plugins"
         self.stack.set_visible_child_name(key)
         self.back_button.set_visible(key == "detail")
         if key == "detail":
@@ -1438,6 +1471,11 @@ class SettingsManager(Adw.Application):
                                 active=self.settings["show_builtin"])
         builtin.connect("notify::active", lambda r, _p: (self.set_setting("show_builtin", r.get_active()), self.fill_plugins()))
         group.add(builtin)
+        maprisma = Adw.SwitchRow(title=_("Show the Maprisma pages"),
+                                 subtitle=_("Maprisma apps and AI (the helper Maprisma apps share) in the sidebar, when a Maprisma app is installed."),
+                                 active=self.settings["show_maprisma"])
+        maprisma.connect("notify::active", lambda r, _p: self.set_show_maprisma(r.get_active()))
+        group.add(maprisma)
         like = (_("Like the windows ({0} px)").format(self.window_rounding) if self.window_rounding is not None
                 else _("Like the windows"))
         corner_row = Adw.ComboRow(title=_("Corners"), subtitle=_("How round the cards, buttons and fields are."),
@@ -1465,6 +1503,10 @@ class SettingsManager(Adw.Application):
         about.add(folder)
         box.append(about)
         self.stack.add_named(scrolled(box), "settings")
+
+    def set_show_maprisma(self, show: bool):
+        self.set_setting("show_maprisma", show)
+        self.rebuild_sidebar()
 
     def set_setting(self, key: str, value):
         self.settings[key] = value
