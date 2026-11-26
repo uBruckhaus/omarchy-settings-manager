@@ -13,11 +13,14 @@ a regular-file check and a byte cap, and only when their real path stays inside 
 
 from __future__ import annotations
 
+import base64
+import json
 import os
 import re
 import shutil
 import stat
 import subprocess
+import sys
 import threading
 import tomllib
 from pathlib import Path
@@ -54,6 +57,11 @@ MAX_IMAGE_BYTES = 40 * 1024 * 1024
 MAX_IMAGE_SIDE = 16384
 MAX_IMAGE_PIXELS = 64_000_000     # ~256 MiB RGBA while a loader decodes before it scales (8K fits)
 MAX_IMAGE_WALK = 100_000          # segments/chunks walked in one image
+MAX_JPEG_STUFFING = 4_000_000     # 0xFF bytes skipped inside a JPEG's image data
+THUMB_MAX_SIDE = 2048             # largest decode size a page may ask for
+THUMB_MEMORY = 2 * 1024 ** 3      # address space of one decoder process
+THUMB_CPU_SECONDS = 20
+THUMB_TIMEOUT = 25.0
 APPLY_TIMEOUT = 180.0
 
 
@@ -142,10 +150,12 @@ def read_image(path: str | Path, max_bytes: int = MAX_IMAGE_BYTES) -> bytes | No
 
 # --- image headers ------------------------------------------------------------------------------
 #
-# gdk-pixbuf 2.44 decodes through glycin, which reads EXIF in this process and (2.2.x) aborts the
-# whole process on some camera EXIF; the loaders also allocate the declared canvas before scaling.
-# So the GTK side only decodes bytes that passed `safe_image`: a JPEG, PNG or still WebP whose
-# size is within the caps, walked to the end, with its metadata (EXIF, XMP, ICC, text) removed.
+# gdk-pixbuf 2.44 decodes through glycin, which reads EXIF in the calling process and (2.2.x)
+# aborts it on some camera EXIF; the loaders also allocate the declared canvas before scaling. So
+# images are decoded in a short-lived child process (`decode_thumbnail`: memory, CPU and time
+# limits; an abort costs only that picture), and only bytes that passed `safe_image` are decoded: a
+# JPEG, PNG or still WebP within the size caps, walked to the end, its metadata (EXIF, XMP, ICC,
+# text) removed so such pictures still show.
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _PNG_KEEP = {b"IHDR", b"PLTE", b"IDAT", b"IEND", b"tRNS"}
@@ -170,7 +180,7 @@ def _clean_png(data: bytes) -> tuple[bytes, int, int]:
         if end > len(data):
             raise ValueError("PNG chunk runs past the end")
         if steps == 1:
-            if kind != b"IHDR" or length < 8:
+            if kind != b"IHDR" or length != 13:
                 raise ValueError("PNG without IHDR")
             size = (int.from_bytes(data[pos + 8:pos + 12], "big"), int.from_bytes(data[pos + 12:pos + 16], "big"))
         if kind in _PNG_KEEP:
@@ -180,8 +190,25 @@ def _clean_png(data: bytes) -> tuple[bytes, int, int]:
             return b"".join(out), size[0], size[1]
 
 
+def _entropy_end(data: bytes, pos: int) -> int:
+    """Where a JPEG scan's image data ends: the next 0xFF that starts a marker (0xFF00 is a
+    stuffed byte, 0xFFD0–D7 restart markers belong to the data)."""
+    for _ in range(MAX_JPEG_STUFFING):
+        found = data.find(b"\xff", pos)
+        if found < 0 or found + 1 >= len(data):
+            raise ValueError("JPEG ends inside image data")
+        follow = data[found + 1]
+        if follow == 0x00 or 0xD0 <= follow <= 0xD7:
+            pos = found + 2
+            continue
+        return found
+    raise ValueError("too many stuffed bytes")
+
+
 def _clean_jpeg(data: bytes) -> tuple[bytes, int, int]:
-    out, pos, size, steps = [data[:2]], 2, None, 0
+    """Walks every segment up to EOI, the scans' image data included (a progressive JPEG has
+    several scans; metadata may follow any of them), keeping all but the dropped kinds."""
+    out, pos, size, steps, scans = [data[:2]], 2, None, 0, 0
     while True:
         steps += 1
         if steps > MAX_IMAGE_WALK or pos + 2 > len(data) or data[pos] != 0xFF:
@@ -190,12 +217,15 @@ def _clean_jpeg(data: bytes) -> tuple[bytes, int, int]:
         if marker == 0xFF:                     # fill byte
             pos += 1
             continue
+        if marker == 0xD9:                     # end of image
+            if not scans or size is None:
+                raise ValueError("JPEG without image data")
+            out.append(b"\xff\xd9")
+            return b"".join(out), size[0], size[1]
         if marker == 0x01 or 0xD0 <= marker <= 0xD8:
             out.append(data[pos:pos + 2])
             pos += 2
             continue
-        if marker == 0xD9:
-            raise ValueError("JPEG without image data")
         if pos + 4 > len(data):
             raise ValueError("JPEG ends early")
         length = int.from_bytes(data[pos + 2:pos + 4], "big")
@@ -203,24 +233,26 @@ def _clean_jpeg(data: bytes) -> tuple[bytes, int, int]:
         if length < 2 or end > len(data):
             raise ValueError("JPEG segment runs past the end")
         if marker in _JPEG_SOF:
-            if length < 7:
-                raise ValueError("short SOF")
+            if length < 7 or size is not None:
+                raise ValueError("short or second SOF")
             size = (int.from_bytes(data[pos + 7:pos + 9], "big"), int.from_bytes(data[pos + 5:pos + 7], "big"))
-        if marker == 0xDA:                     # start of scan: the rest is image data
-            if size is None:
-                raise ValueError("JPEG without SOF")
-            out.append(data[pos:])
-            return b"".join(out), size[0], size[1]
         if marker not in _JPEG_DROP:
             out.append(data[pos:end])
         pos = end
+        if marker == 0xDA:                     # start of scan: its image data follows
+            if size is None:
+                raise ValueError("JPEG without SOF")
+            scans += 1
+            stop = _entropy_end(data, pos)
+            out.append(data[pos:stop])
+            pos = stop
 
 
 def _clean_webp(data: bytes) -> tuple[bytes, int, int]:
     limit = 8 + int.from_bytes(data[4:8], "little")
     if limit > len(data) or limit < 20:
         raise ValueError("WebP ends before its declared size")
-    out, pos, steps, size, vp8x = bytearray(data[:12]), 12, 0, None, None
+    out, pos, steps, size, vp8x, frame = bytearray(data[:12]), 12, 0, None, None, None
     while pos < limit:
         steps += 1
         if steps > MAX_IMAGE_WALK or pos + 8 > limit:
@@ -233,20 +265,30 @@ def _clean_webp(data: bytes) -> tuple[bytes, int, int]:
         body = data[pos + 8:pos + 8 + length]
         if kind in (b"ANIM", b"ANMF"):
             raise ValueError("animated WebP")
-        if kind == b"VP8X" and length >= 10:
+        if kind == b"VP8X":
+            if length < 10 or vp8x is not None or frame is not None:
+                raise ValueError("bad or second VP8X")
             if body[0] & 0x02:
                 raise ValueError("animated WebP")
             vp8x = len(out) + 8
             size = (int.from_bytes(body[4:7], "little") + 1, int.from_bytes(body[7:10], "little") + 1)
-        elif kind == b"VP8 " and size is None and length >= 10 and body[3:6] == b"\x9d\x01\x2a":
-            size = (int.from_bytes(body[6:8], "little") & 0x3FFF, int.from_bytes(body[8:10], "little") & 0x3FFF)
-        elif kind == b"VP8L" and size is None and length >= 5 and body[0] == 0x2F:
-            bits = int.from_bytes(body[1:5], "little")
-            size = ((bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1)
+        elif kind in (b"VP8 ", b"VP8L"):
+            if frame is not None:
+                raise ValueError("second WebP frame")
+            if kind == b"VP8 " and length >= 10 and body[3:6] == b"\x9d\x01\x2a":
+                frame = (int.from_bytes(body[6:8], "little") & 0x3FFF, int.from_bytes(body[8:10], "little") & 0x3FFF)
+            elif kind == b"VP8L" and length >= 5 and body[0] == 0x2F:
+                bits = int.from_bytes(body[1:5], "little")
+                frame = ((bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1)
+            else:
+                raise ValueError("bad WebP frame header")
+            if size is not None and size != frame:
+                raise ValueError("WebP canvas and frame sizes differ")
+            size = frame
         if kind not in _WEBP_DROP:
             out += data[pos:end]
         pos = end
-    if size is None:
+    if frame is None:
         raise ValueError("WebP without a frame")
     if vp8x is not None:
         out[vp8x] &= ~(0x20 | 0x08 | 0x04) & 0xFF       # no ICC, EXIF, XMP
@@ -281,7 +323,7 @@ def load_image(path: str | Path) -> tuple[bytes, int, int] | None:
 def image_key(path: str | Path) -> tuple | None:
     """(path, mtime_ns, size) for the thumbnail cache, or None when it isn't a regular file."""
     try:
-        info = os.stat(path)
+        info = os.lstat(path)            # a link is never read (O_NOFOLLOW), so never listed either
     except (OSError, ValueError):
         return None
     if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_IMAGE_BYTES:
@@ -366,7 +408,7 @@ def _entries(directory: Path) -> list[os.DirEntry]:
 
 def _usable_image(entry_path: Path, roots: list[str]) -> bool:
     try:
-        if not stat.S_ISREG(os.stat(entry_path).st_mode):
+        if not stat.S_ISREG(os.lstat(entry_path).st_mode):     # links refused, as read_bytes does
             return False
     except OSError:
         return False
@@ -430,12 +472,13 @@ def current_slug() -> str:
         slug = data.decode("utf-8", "replace").strip()
         if valid_slug(slug):
             return slug
-    if not can_apply():
+    if shutil.which("omarchy-theme-current") is None:
         return ""
-    result = core.run(["omarchy", "theme", "current"], timeout=10, max_bytes=4096)
+    result = core.run(["omarchy-theme-current"], timeout=10, max_bytes=4096)
     if result.ok:
         slug = slug_of(result.out.strip().splitlines()[0] if result.out.strip() else "")
-        if valid_slug(slug):
+        # It prints "Unknown" without a theme.name; only a theme that exists counts.
+        if valid_slug(slug) and slug in theme_folders():
             return slug
     return ""
 
@@ -458,7 +501,7 @@ def theme_manager_state() -> dict:
 
 
 def can_apply() -> bool:
-    return shutil.which("omarchy") is not None
+    return shutil.which("omarchy-theme-set") is not None
 
 
 def list_themes() -> dict:
@@ -516,14 +559,16 @@ def _short(text: str, limit: int = 240) -> str:
 
 
 def apply_theme(slug: str) -> dict:
-    """`omarchy theme set <slug>` (only on the user's click). {"ok": bool, "error": str}."""
+    """`omarchy-theme-set <slug>` (only on the user's click). {"ok": bool, "error": str}.
+    Called directly: the `omarchy` dispatcher routes by the longest matching command name, so
+    `omarchy theme set gnome` would run omarchy-theme-set-gnome instead of applying a theme."""
     if not valid_slug(slug):
         return {"ok": False, "error": "invalid theme name"}
     if slug not in theme_folders():
         return {"ok": False, "error": "theme not found"}
     if not can_apply():
-        return {"ok": False, "error": "omarchy: not found"}
-    result = core.run(["omarchy", "theme", "set", slug], timeout=APPLY_TIMEOUT, max_bytes=256 * 1024)
+        return {"ok": False, "error": "omarchy-theme-set: not found"}
+    result = core.run(["omarchy-theme-set", slug], timeout=APPLY_TIMEOUT, max_bytes=256 * 1024)
     if result.ok:
         return {"ok": True, "error": ""}
     reason = _short(result.err) or _short(result.out)
@@ -547,6 +592,12 @@ def theme_manager_toggle() -> Path | None:
             or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
         return None
     if os.path.dirname(_real(script)) != _real(folder):
+        return None
+    try:
+        folder_info = os.stat(_real(folder))
+    except OSError:
+        return None
+    if folder_info.st_uid != os.getuid() or folder_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
         return None
     return script
 
@@ -582,3 +633,91 @@ def open_theme_manager() -> dict:
         return {"ok": False, "error": "Theme Manager is not installed"}
     ok, error = _launch([str(script)])
     return {"ok": ok, "error": error}
+
+
+# --- thumbnails (decoded in a child process) ----------------------------------------------------
+
+def _scaled(width: int, height: int, want_w: int, want_h: int) -> tuple[int, int]:
+    """The size to decode at: covering want_w × want_h, never bigger than the image, and never
+    more than twice the wanted size on either side (a panorama doesn't stay huge)."""
+    scale = min(1.0, max(want_w / width, want_h / height), 2 * want_w / width, 2 * want_h / height)
+    return max(1, round(width * scale)), max(1, round(height * scale))
+
+
+def decode_thumbnail(path: str | Path, want_w: int, want_h: int) -> dict | None:
+    """The image at path decoded and scaled in a child process: {"width", "height", "alpha",
+    "pixels"} (tightly packed RGB or RGBA rows), or None. The child has its own address-space and
+    CPU limits and a timeout, so a decoder that aborts, loops or balloons costs only this picture."""
+    path = str(path)
+    if (not os.path.isabs(path) or "\x00" in path or not isinstance(want_w, int) or not isinstance(want_h, int)
+            or not 1 <= want_w <= THUMB_MAX_SIDE or not 1 <= want_h <= THUMB_MAX_SIDE):
+        return None
+    limit = 2 * want_w * 2 * want_h * 4 * 4 // 3 + 4096
+    result = core.run([sys.executable, "-E", "-s", str(Path(__file__).resolve()), "--thumbnail", "--",
+                       path, str(want_w), str(want_h)], timeout=THUMB_TIMEOUT, max_bytes=limit)
+    if not result.ok:
+        return None
+    header, _sep, body = result.out.partition("\n")
+    try:
+        info = json.loads(header)
+        width, height, channels = int(info["width"]), int(info["height"]), int(info["channels"])
+        pixels = base64.b64decode(body.strip(), validate=True)
+    except (ValueError, KeyError, TypeError, RecursionError):
+        return None
+    if (channels not in (3, 4) or not 0 < width <= 2 * want_w or not 0 < height <= 2 * want_h
+            or len(pixels) != width * height * channels):
+        return None
+    return {"width": width, "height": height, "alpha": channels == 4, "pixels": pixels}
+
+
+def _thumbnail_main(args: list[str]) -> int:
+    """Child side of decode_thumbnail: limits first, then read + check (load_image), decode at the
+    scaled size, write a JSON header line and the base64 pixels."""
+    import resource
+    resource.setrlimit(resource.RLIMIT_AS, (THUMB_MEMORY, THUMB_MEMORY))
+    resource.setrlimit(resource.RLIMIT_CPU, (THUMB_CPU_SECONDS, THUMB_CPU_SECONDS))
+    try:
+        path, want_w, want_h = args[0], int(args[1]), int(args[2])
+    except (IndexError, ValueError):
+        return 2
+    checked = load_image(path)
+    if checked is None:
+        return 3
+    data, width, height = checked
+    target = _scaled(width, height, want_w, want_h)
+    import gi
+    gi.require_version("GdkPixbuf", "2.0")
+    from gi.repository import GdkPixbuf, GLib
+    loader = GdkPixbuf.PixbufLoader()
+    agreed = []
+
+    def prepared(ld, w, h):
+        agreed.append((w, h) == (width, height))   # the decoder must agree with the checked header
+        ld.set_size(*(target if agreed[-1] else (1, 1)))
+
+    loader.connect("size-prepared", prepared)
+    try:
+        try:
+            loader.write(data)
+        finally:
+            loader.close()
+        pixbuf = loader.get_pixbuf()
+    except (GLib.Error, TypeError):
+        return 4
+    if pixbuf is None or agreed != [True]:
+        return 4
+    w, h, n, stride = pixbuf.get_width(), pixbuf.get_height(), pixbuf.get_n_channels(), pixbuf.get_rowstride()
+    if n not in (3, 4) or pixbuf.get_bits_per_sample() != 8:
+        return 4
+    raw = pixbuf.get_pixels()
+    rows = b"".join(raw[r * stride:r * stride + w * n] for r in range(h))
+    sys.stdout.write(json.dumps({"width": w, "height": h, "channels": n}) + "\n")
+    sys.stdout.write(base64.b64encode(rows).decode("ascii"))
+    sys.stdout.flush()
+    return 0
+
+
+if __name__ == "__main__":
+    if sys.argv[1:3] == ["--thumbnail", "--"]:
+        sys.exit(_thumbnail_main(sys.argv[3:]))
+    sys.exit(2)

@@ -24,11 +24,10 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-gi.require_version("GdkPixbuf", "2.0")
 gi.require_version("PangoCairo", "1.0")
 gi.require_version("Gsk", "4.0")
 gi.require_version("Graphene", "1.0")
-from gi.repository import Adw, Gdk, GdkPixbuf, Gio, GLib, Graphene, Gsk, Gtk, Pango, PangoCairo  # noqa: E402
+from gi.repository import Adw, Gdk, Gio, GLib, Graphene, Gsk, Gtk, Pango, PangoCairo  # noqa: E402
 
 import theme_core  # noqa: E402
 from i18n import _, ngettext  # noqa: E402
@@ -39,45 +38,26 @@ CARD_SIZE = (320, 180)          # decode size of a card's picture
 BIG_SIZE = (960, 540)           # decode size of the big preview
 HOVER_SELECT_MS = 220           # a pointer resting this long on a card shows it in the big preview
 CACHE_TEXTURES = 160
+DECODERS = 2                    # decoder child processes at a time
 DEFAULT_CORNER = 8
 
 
 # --- images ------------------------------------------------------------------------------------
 
 def _decode(path: str, size: tuple[int, int]) -> Gdk.Texture | None:
-    """The image at path scaled down to cover size (never up), or None. Runs off the GTK thread:
-    theme_core reads it once and checks it; the loader scales while it decodes."""
-    checked = theme_core.load_image(path)
-    if checked is None:
+    """The image at path scaled down to cover size, or None. Runs off the GTK thread; the decoding
+    itself happens in a limited child process (theme_core.decode_thumbnail)."""
+    image = theme_core.decode_thumbnail(path, size[0], size[1])
+    if image is None:
         return None
-    data, width, height = checked
-    scale = min(1.0, max(size[0] / width, size[1] / height))
-    loader = GdkPixbuf.PixbufLoader()
-
-    def prepared(ld, w, h):
-        if (w, h) != (width, height):          # the decoder disagrees with the checked header
-            ld.set_size(1, 1)
-            return
-        ld.set_size(max(1, round(w * scale)), max(1, round(h * scale)))
-
-    loader.connect("size-prepared", prepared)
-    try:
-        try:
-            loader.write(data)
-        finally:
-            loader.close()
-        pixbuf = loader.get_pixbuf()
-    except (GLib.Error, TypeError):
-        return None
-    if pixbuf is None or (pixbuf.get_width() <= 1 < width):
-        return None
-    fmt = Gdk.MemoryFormat.R8G8B8A8 if pixbuf.get_has_alpha() else Gdk.MemoryFormat.R8G8B8
-    return Gdk.MemoryTexture.new(pixbuf.get_width(), pixbuf.get_height(), fmt,
-                                 pixbuf.read_pixel_bytes(), pixbuf.get_rowstride())
+    fmt = Gdk.MemoryFormat.R8G8B8A8 if image["alpha"] else Gdk.MemoryFormat.R8G8B8
+    stride = image["width"] * (4 if image["alpha"] else 3)
+    return Gdk.MemoryTexture.new(image["width"], image["height"], fmt, GLib.Bytes.new(image["pixels"]), stride)
 
 
 class Thumbnails:
-    """Textures per (path, mtime, size, decode size); decoded by one worker thread, nearest first."""
+    """Textures per (path, mtime, size, decode size); decoded by DECODERS worker threads (each runs
+    one child process at a time), the big preview first."""
 
     def __init__(self):
         self.cache: OrderedDict = OrderedDict()
@@ -86,7 +66,7 @@ class Thumbnails:
         self.jobs: queue.PriorityQueue = queue.PriorityQueue()
         self.order = itertools.count()
         self.lock = threading.Lock()
-        self.thread: threading.Thread | None = None
+        self.threads: list[threading.Thread] = []
 
     def peek(self, path: str | None, size: tuple[int, int]) -> Gdk.Texture | None:
         key = self._key(path, size)
@@ -107,9 +87,11 @@ class Thumbnails:
         self.waiting[key] = [callback]
         self.jobs.put((priority, next(self.order), key, path, size))
         with self.lock:
-            if self.thread is None or not self.thread.is_alive():
-                self.thread = threading.Thread(target=self._work, daemon=True)
-                self.thread.start()
+            self.threads = [t for t in self.threads if t.is_alive()]
+            if len(self.threads) < DECODERS:
+                thread = threading.Thread(target=self._work, daemon=True)
+                self.threads.append(thread)
+                thread.start()
         return None
 
     @staticmethod
@@ -125,8 +107,9 @@ class Thumbnails:
                 _priority, _n, key, path, size = self.jobs.get(timeout=20)
             except queue.Empty:
                 with self.lock:
-                    if self.jobs.empty():
-                        self.thread = None      # idle: the next request starts a new one
+                    if self.jobs.empty():       # idle: the next request starts a new one
+                        if threading.current_thread() in self.threads:
+                            self.threads.remove(threading.current_thread())
                         return
                 continue
             try:
@@ -211,6 +194,7 @@ class RatioBin(Gtk.Widget):
         if self.child is not None:
             self.child.unparent()
             self.child = None
+        Gtk.Widget.do_dispose(self)
 
 
 class SideBySide(Gtk.Widget):
@@ -273,6 +257,7 @@ class SideBySide(Gtk.Widget):
             if child is not None:
                 child.unparent()
                 setattr(self, name, None)
+        Gtk.Widget.do_dispose(self)
 
 
 def _at(x: float, y: float) -> Gsk.Transform:
@@ -315,6 +300,7 @@ class ThemeCard:
         self.wall_path = walls[0] if theme.get("preview") and walls else None
         self.flip_timer = 0
         self.select_timer = 0
+        self.hovered = False
 
         self.child = Gtk.FlowBoxChild()
         self.child.slug = self.slug
@@ -389,6 +375,7 @@ class ThemeCard:
 
     def on_enter(self):
         self.cancel()
+        self.hovered = True
         self.select_timer = GLib.timeout_add(HOVER_SELECT_MS, self._hover_select)
         page = self.page
         if self.wall_path and page.flip and page.delay > 0 and _animations():
@@ -396,6 +383,7 @@ class ThemeCard:
 
     def on_leave(self):
         self.cancel()
+        self.hovered = False
         if self.stack.get_visible_child_name() == "wall":
             self.stack.set_visible_child_name("preview")
 
@@ -419,7 +407,7 @@ class ThemeCard:
         return False
 
     def _got_wall(self, texture):
-        if texture is None or not self._live():
+        if texture is None or not self._live() or not self.hovered:     # the pointer left meanwhile
             return
         self.wall_pic.set_paintable(texture)
         if self.stack.get_visible_child_name() == "preview":
@@ -448,6 +436,7 @@ class ThemePages(PageGroup):
         self.big_front = "a"
         self.auto_timer = 0
         self.watch_timer = 0
+        self.current_gen = 0                # drops late answers of _refresh_current
         self.monitor = None
         self.css = None
         self.flow: Gtk.FlowBox | None = None
@@ -620,8 +609,6 @@ class ThemePages(PageGroup):
         self._drop_cards()
         self.themes = {}
         clear(body)
-        self.big_bin.set_visible(False)
-        self.hint.set_visible(False)
         group = Adw.PreferencesGroup()
         row = Adw.ActionRow(title=escape(text))
         row.add_prefix(Gtk.Image(icon_name="dialog-warning-symbolic"))
@@ -637,6 +624,15 @@ class ThemePages(PageGroup):
             card.cancel()
         self.cards = {}
         self.flow = None
+        self._hide_big()
+
+    def _hide_big(self):
+        """No big preview: its timer stops and the next selection rebuilds it from the new list."""
+        self._cancel_auto()
+        self.big_slug = ""
+        self.big_sources = []
+        self.big_bin.set_visible(False)
+        self.hint.set_visible(False)
 
     def _render(self, body: Gtk.Box, data: dict):
         self.data = data
@@ -648,6 +644,7 @@ class ThemePages(PageGroup):
             self.delay = 2.0
         themes = [t for t in data["themes"] if isinstance(t, dict) and theme_core.valid_slug(t.get("slug"))]
         self.themes = {t["slug"]: t for t in themes}
+        self.current_gen += 1               # this list's mark is the newest
         self._drop_cards()
         clear(body)
 
@@ -665,8 +662,6 @@ class ThemePages(PageGroup):
             body.append(_note(_("The omarchy command was not found: themes can be looked at here, not applied.")))
         if not themes:
             body.append(_note(_("No themes found in ~/.config/omarchy/themes or /usr/share/omarchy/themes.")))
-            self.big_bin.set_visible(False)
-            self.hint.set_visible(False)
             self._update_status()
             self._watch()
             return
@@ -729,9 +724,7 @@ class ThemePages(PageGroup):
                 return
         if self.flow is not None:
             self.flow.unselect_all()
-        self.big_bin.set_visible(False)
-        self.hint.set_visible(False)
-        self.big_slug = ""
+        self._hide_big()
 
     def _update_empty(self, empty: bool):
         if self.flow is None:
@@ -922,8 +915,14 @@ class ThemePages(PageGroup):
         self._update_status()
 
     def _refresh_current(self):
-        run_async(self.app, theme_core.current_slug,
-                  lambda slug: self._set_current(slug) if isinstance(slug, str) else None)
+        self.current_gen += 1
+        gen = self.current_gen
+
+        def done(slug):
+            if gen == self.current_gen and not self.applying and isinstance(slug, str):
+                self._set_current(slug)
+
+        run_async(self.app, theme_core.current_slug, done)
 
     def _watch(self):
         """Follow `omarchy theme set` from elsewhere (menu, switcher, Theme Manager): the mark moves."""
