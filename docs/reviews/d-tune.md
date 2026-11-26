@@ -146,4 +146,85 @@ Note for the integrator (not a finding against Task D's files): the README top s
 say Settings Manager never asks for administrator rights (see the author's report). That has to
 change before 1.1, because of the marketplace privilege baseline.
 
+NOT CLEAN (round 1)
+
+## Round 2
+
+Checked: `git diff 5388318..task/d-tune` (f6e18e6, 2971f83). Same read-only rules. Full suite:
+126 tests OK (22 in `test_tune_core`, translations included). Live, read-only:
+- The new locale parser on this machine's `localectl status` returns `{LANG: en_US.UTF-8}`, ok.
+- On a right-aligned sample with `LANGUAGE=de_DE:en_US` + `LC_TIME` + `LC_MEASUREMENT` it keeps all
+  four. `System Locale: n/a` gives ok with no vars.
+- `_other_sysctl_sets_bbr()` is True here (Omarchy's 99-omarchy-sysctl.conf).
+- `_resolve_usr_bin` gives `/usr/bin/pkexec` and `/usr/bin/env`.
+- Default route, active Wi-Fi and resolvectl IPv6 continuation lines are detected correctly.
+- `uwsm-app`, `omarchy-show-done`, `omarchy-show-logo` and `omarchy-restart-gum` are present.
+
+### Round-1 findings
+
+1. **Locale wipe: fixed.** `parse_localectl_status_strict` (`tune_core.py:1287-1351`) detects
+   continuation lines by indentation and validates `LANGUAGE` as a colon list. `set_locale` refuses
+   to write when any existing line fails validation (`tune_core.py:1501-1503`). Tests cover this.
+2. **Wi-Fi reapply: fixed.** A failed reapply after a successful modify returns `(True, "reconnect")`
+   (`tune_core.py:1130-1133`), and the UI says "takes effect on reconnect".
+3. **Terminal kill/close: fixed.** Both actions now use `uwsm-app -t service -- xdg-terminal-exec …
+   -e bash -c <presentation> settings-manager <cmd>` with `omarchy-show-done`, launched detached
+   with a 2 s exit check (`tune_core.py:261-308, 545-593, 895-904`). There is no 300 s kill anymore,
+   and the terminal stays open until a key is pressed. The toast now says "opened in a terminal",
+   and the button is disabled only while the launch is starting. Inside the terminal,
+   `omarchy dns Custom` gets a TTY, so sudo prompts there as `omarchy-dns` expects. See new item N2.
+4. **Staged-file swap reaching root: partly fixed.** A swapped content can no longer reach an
+   active file: it lands in `.<name>.sm-tmp` (not `*.conf`, so neither systemd-sysctl nor bluetoothd
+   reads it). It is compared byte for byte by a process that can't alter it any more (root-owned
+   directory) before `mv` (`tune_core.py:337-386`). BBR now applies with an allowlisted
+   `sysctl -w` (`tune_core.py:1086-1096`). So the root code execution path is closed. The remaining
+   problem is new item N1.
+5. **BBR pin / split state: fixed.** "On" removes our drop-in when other sysctl.d files already set
+   bbr+fq (`tune_core.py:998-1074`). A cancelled runtime apply reports "takes effect after restart".
+6. **Concurrent actions: fixed.** `_run_privileged`/`_register_mutating` (`pages_tune.py:105-127`)
+   allow one action at a time, disable the page's mutating rows (re-registered on rebuild while
+   busy) and revert the control when a second action is refused.
+7. **PATH lookup for the ranker: fixed.** `_resolve_usr_bin` accepts only binaries whose realpath
+   is in `/usr/bin` and passes absolute paths.
+8. **Non-atomic write / lossy decode: fixed.** The file is installed to a sibling temp and then
+   moved with `mv -f`. `main.conf` must decode strictly as UTF-8.
+9. **Wi-Fi/Ethernet and resolvectl: fixed.** There is now `_active_wifi_connection` plus a
+   default-route device for DNS, and resolvectl continuation lines are followed by indentation.
+
+### New findings
+
+N1. **Medium: the verified install still copies a swapped symlink target world-readable into /etc, and one change now takes 3–4 password prompts.**
+`tune_core.py:366-385`, used by `set_bbr` (`1081`) and `set_bluetooth_option` (`1271`).
+- *Disclosure:* GNU `install` follows a symlink given as the source. A same-user process
+  (the M4 premise) replaces the staged file in `/tmp/sm-tune-*/` with a symlink to `/etc/shadow`
+  (or an SSH host key) while the password dialog is open. Root then copies it to
+  `/etc/sysctl.d/.99-zz-…conf.sm-tmp` with mode 0644. The read-back mismatches, but cleanup needs
+  yet another pkexec prompt (`tune_core.py:377`, return value ignored). Until that prompt is
+  answered, and for good if the user cancels it, the copy stays readable by every user.
+- *Prompts:* `org.freedesktop.policykit.exec` is `auth_admin` with no keep (checked in
+  `/usr/share/polkit-1/actions/org.freedesktop.policykit.policy`). A BBR or Bluetooth change now
+  asks for the password 3 times (install, mv, then sysctl -w or the Bluetooth restart), and 4 times
+  on a mismatch. Cancelling the 2nd prompt leaves a root-owned `.…sm-tmp` in `/etc`. Rule 3(b)
+  asks for one non-interactive pkexec step.
+
+*Fix (simplify):* do the whole root side in one pkexec call with a constant script and
+positional arguments, e.g. `pkexec /usr/bin/sh -c '<fixed script>' sh <staged> <sha256> <target>`
+(Maprisma's `tuning.dart:177-190` does it this way). The script should:
+- refuse a staged path that is not a regular file (`[ -f "$1" ] && [ ! -L "$1" ]`);
+- run `install -m 0600 -o 0 -g 0` to the temp file;
+- run `sha256sum -c` against the hash passed in argv, and `rm` the temp file on mismatch;
+- `chmod 0644` and `mv -f` the temp file into place;
+- run `sysctl -w` or `systemctl try-restart` with allowlisted values.
+
+The script must also check that `<target>` is one of the two fixed paths. That gives one prompt,
+verification as root before anything becomes readable, and no partial state. For BBR it is simpler
+still: the content is two allowlisted words, so the root script can write it itself, with no
+staged file at all.
+
+N2. **Low: `launch()` runs commands without `plugins_core.run` (rule 2).**
+`tune_core.py:261-288` starts its own `subprocess.Popen`, in addition to `apps_core.launch` (B)
+and `services_core.launch` (C). `uwsm-app -t service` returns at once, so B's
+`core.run(argv, timeout=15)` would do. The no-`uwsm-app` fallback (`tune_core.py:306-308`) is the
+only reason for a detached Popen. Integrator item: keep one shared launcher in `plugins_core.py`.
+
 NOT CLEAN
