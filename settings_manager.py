@@ -1,26 +1,21 @@
 #!/usr/bin/env python3
-"""Settings Manager: manage the installed Omarchy plugins in one window.
+"""Settings Manager: manage Omarchy plugins and Hyprland/Omarchy desktop settings in one window.
 
-Laid out like Maprisma Settings (a sidebar of pages left, the page right), but about Omarchy's
-shell plugins instead of the Maprisma apps:
+Laid out like Maprisma Settings (a reorderable sidebar of pages left, the page right):
 
-- Plugins: every installed plugin, grouped by "In the bar", "Running in the background" and
-  "Not in use", with a filter, update marks and a ⋮ menu (put in / take out of the bar, update,
-  remove, open its folder, GitHub, marketplace). A click opens its details: facts, its places in
-  the bar and the settings stored in its bar entry (shell.json), editable.
-- Bar: the bar's sections in order, the built-in widgets included, with ← / → and "Move to".
-- Updates: the git checkouts with new commits upstream, what they bring, Update / Update all.
-- Settings: language, update check on opening, Omarchy's own plugins in the list; About.
+- Plugins, Bar, Updates: manage installed Omarchy plugins, bar placement/order/settings, and git
+  updates via Omarchy's own commands (plugins_core).
+- Network, Bluetooth, Appearance, Displays, Sound, Power, Input devices, Applications, About:
+  zero-privilege user/desktop settings (pages_desktop, pages_system).
+- Settings: language, update check on opening, Omarchy's own plugins, corners, F12 screenshot key.
 
-Every change goes through Omarchy's own commands (plugins_core). A normal app window: started
-again, it comes to the front; `--toggle` (the bar icon) closes it when it is in front;
-`--page <plugins|bar|updates|settings>` opens a page, `--plugin <id>` a plugin's details.
+A normal app window: started again, it comes to the front; `--toggle` (the bar icon) closes it
+when it is in front; `--page <key>` opens any of the 13 pages, `--plugin <id>` a plugin's details.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import sys
 import threading
 import time
@@ -34,7 +29,7 @@ import gi  # noqa: E402
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
+from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk  # noqa: E402
 
 import corners  # noqa: E402
 import i18n  # noqa: E402
@@ -42,17 +37,49 @@ import plugins_core as core  # noqa: E402
 import screenshot  # noqa: E402
 import theme  # noqa: E402
 from i18n import N_, _, ngettext  # noqa: E402
+from pages_desktop import DesktopPages  # noqa: E402
+from pages_system import SystemPages  # noqa: E402
+from ui_helpers import (  # noqa: E402, F401
+    clear,
+    copy_to_clipboard,
+    escape,
+    guard_text,
+    guard_text_fields,
+    label,
+    page_box,
+    scrolled,
+)
 
 APP_ID = "org.omarchy.settingsmanager"
-VERSION = "0.4.0"
+VERSION = "1.0.0"
 CONFIG_DIR = Path.home() / ".config/omarchy/settings-manager"
 SETTINGS_FILE = CONFIG_DIR / "settings.json"
 i18n.SETTINGS_FILE = SETTINGS_FILE
 
-PAGES = (("plugins", N_("Plugins"), "application-x-addon-symbolic"),
-         ("bar", N_("Bar"), "view-grid-symbolic"),
-         ("updates", N_("Updates"), "software-update-available-symbolic"),
-         ("settings", N_("Settings"), "preferences-system-symbolic"))
+PAGES = (
+    ("plugins", N_("Plugins"), "application-x-addon-symbolic"),
+    ("bar", N_("Bar"), "view-grid-symbolic"),
+    ("updates", N_("Updates"), "software-update-available-symbolic"),
+    ("network", N_("Network"), "network-wireless-symbolic"),
+    ("bluetooth", N_("Bluetooth"), "bluetooth-active-symbolic"),
+    ("appearance", N_("Appearance"), "preferences-desktop-appearance-symbolic"),
+    ("displays", N_("Displays"), "preferences-desktop-display-symbolic"),
+    ("sound", N_("Sound"), "audio-speakers-symbolic"),
+    ("power", N_("Power"), "power-profile-balanced-symbolic"),
+    ("input", N_("Input devices"), "input-keyboard-symbolic"),
+    ("applications", N_("Applications"), "preferences-desktop-apps-symbolic"),
+    ("about", N_("About"), "computer-symbolic"),
+    ("settings", N_("Settings"), "preferences-system-symbolic"),
+)
+PAGE_MAP = {key: (key, title, icon) for key, title, icon in PAGES}
+PAGE_KEYS = tuple(key for key, _title, _icon in PAGES)
+SEPARATOR = "---"
+DEFAULT_SIDEBAR_ORDER = [
+    "plugins", "bar", "updates", SEPARATOR,
+    "network", "bluetooth", "appearance", "displays", "sound", "power", "input", "applications",
+    SEPARATOR, "about", "settings",
+]
+
 SECTION_NAMES = {"left": N_("Left"), "centerBegin": N_("Before the centre"), "center": N_("Centre (clock box)"),
                  "centerEnd": N_("After the centre"), "tray": N_("Tray"), "right": N_("Right")}
 KIND_NAMES = {"bar": N_("Bar"), "bar-widget": N_("Bar widget"), "panel": N_("Panel"), "overlay": N_("Overlay"),
@@ -65,13 +92,45 @@ FETCH_WORKERS = 4
 
 # --- settings file -------------------------------------------------------------------------------
 
+def normalize_sidebar_order(raw) -> list[str]:
+    """Validate a saved sidebar order: keep each valid page key once, append any missing page keys,
+    keep valid '---' separators, and strip leading, trailing, or consecutive separators."""
+    if not isinstance(raw, list):
+        return list(DEFAULT_SIDEBAR_ORDER)
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        if item == SEPARATOR:
+            if result and result[-1] != SEPARATOR:
+                result.append(SEPARATOR)
+        elif item in PAGE_MAP and item not in seen:
+            seen.add(item)
+            result.append(item)
+    if not seen:
+        return list(DEFAULT_SIDEBAR_ORDER)
+    while result and result[-1] == SEPARATOR:
+        result.pop()
+    for key in PAGE_KEYS:
+        if key not in seen:
+            seen.add(key)
+            result.append(key)
+    while result and result[0] == SEPARATOR:
+        result.pop(0)
+    while result and result[-1] == SEPARATOR:
+        result.pop()
+    return result
+
+
 def load_settings() -> dict:
     data = core.read_json_file(SETTINGS_FILE, 64 * 1024)
     data = data if isinstance(data, dict) else {}
     return {"check_updates": data.get("check_updates", True) is not False,
             "show_builtin": data.get("show_builtin") is True,
             "corners": corners.choice(data.get("corners")),
-            "screenshot_key": data.get("screenshot_key", True) is not False}
+            "screenshot_key": data.get("screenshot_key", True) is not False,
+            "sidebar_order": normalize_sidebar_order(data.get("sidebar_order"))}
 
 
 def save_setting(key: str, value) -> None:
@@ -91,7 +150,7 @@ def parse_args(argv: list) -> dict:
                 wanted[key] = word.split("=", 1)[1]
     if not core.valid_id(wanted["plugin"]):
         wanted["plugin"] = ""
-    if wanted["page"] not in {p for p, _n, _i in PAGES}:
+    if wanted["page"] not in PAGE_MAP:
         wanted["page"] = ""
     return wanted
 
@@ -112,92 +171,6 @@ def where_text(plugin: dict) -> str:
     return _("off")
 
 
-def label(text: str = "", css: tuple = (), xalign: float = 0.0, wrap: bool = False, selectable: bool = False) -> Gtk.Label:
-    widget = Gtk.Label(label=text, xalign=xalign)
-    for name in css:
-        widget.add_css_class(name)
-    if wrap:
-        widget.set_wrap(True)
-        widget.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
-    widget.set_selectable(selectable)
-    if any(name.startswith("sm-pill") for name in css):
-        widget.set_valign(Gtk.Align.CENTER)
-    return widget
-
-
-def guard_text_fields(root: Gtk.Widget, app) -> None:
-    """Every text field under root takes text from other clients only through a bounded read: GTK's
-    own paste, middle-click paste and text drops buffer a foreign offer with no limit or deadline."""
-    stack = [root]
-    while stack:
-        widget = stack.pop()
-        if isinstance(widget, Gtk.Text):
-            guard_text(widget, app)
-            continue
-        child = widget.get_first_child()
-        while child is not None:
-            stack.append(child)
-            child = child.get_next_sibling()
-
-
-def guard_text(text: Gtk.Text, app) -> None:
-    if getattr(text, "_sm_guarded", False):
-        return
-    text._sm_guarded = True
-    if text.get_max_length() == 0:
-        text.set_max_length(core.MAX_SETTING_TEXT)
-    text.connect("paste-clipboard", lambda t: _paste(t, app))      # Ctrl+V, Shift+Insert, the menu
-    middle = Gtk.GestureClick(button=Gdk.BUTTON_MIDDLE)
-    middle.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
-    middle.connect("pressed", lambda gesture, *_: gesture.set_state(Gtk.EventSequenceState.CLAIMED))
-    text.add_controller(middle)
-    controllers = text.observe_controllers()
-    for i in reversed(range(controllers.get_n_items())):
-        controller = controllers.get_item(i)
-        if isinstance(controller, (Gtk.DropTarget, Gtk.DropTargetAsync)):
-            text.remove_controller(controller)
-
-
-def _paste(text: Gtk.Text, app) -> None:
-    text.stop_emission_by_name("paste-clipboard")
-
-    def worker():
-        pasted = core.clipboard_text()
-        GLib.idle_add(insert, pasted)
-
-    def insert(pasted):
-        if pasted is None:
-            app.toast(_("Clipboard text is too long to paste (max {0} KiB)").format(core.MAX_PASTE // 1024))
-        elif pasted:
-            text.delete_selection()
-            text.set_position(text.insert_text(pasted, text.get_position()))
-        return False
-    threading.Thread(target=worker, daemon=True).start()
-
-
-def clear(box: Gtk.Widget) -> None:
-    child = box.get_first_child()
-    while child is not None:
-        nxt = child.get_next_sibling()
-        box.remove(child)
-        child = nxt
-
-
-def scrolled(child: Gtk.Widget) -> Gtk.ScrolledWindow:
-    clamp = Adw.Clamp(maximum_size=860, tightening_threshold=600)
-    clamp.set_child(child)
-    window = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True)
-    window.set_child(clamp)
-    return window
-
-
-def page_box() -> Gtk.Box:
-    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
-    for side in ("top", "bottom", "start", "end"):
-        getattr(box, f"set_margin_{side}")(18)
-    return box
-
-
 # --- the app -------------------------------------------------------------------------------------
 
 class SettingsManager(Adw.Application):
@@ -210,8 +183,12 @@ class SettingsManager(Adw.Application):
         self.incoming: dict = {}           # id → commit subjects an update brings
         self.checking = False
         self.busy = False
+        self._busy_count = 0
+        self._pending_updates = 0
+        self._sidebar_popover = None
+        self.loaded_pages: set[str] = set()
         self.detail_id = ""
-        self.bar_selected = ""             # Bar page: the chip/row picked last ("section:index")
+        self.bar_selected = ""             # Bar page: the chip/row picked last
         self.left_front = 0.0
         self.provider = None
         self.reload_pending = False
@@ -267,6 +244,9 @@ class SettingsManager(Adw.Application):
         self.page_title = Gtk.Label(css_classes=["title"])
         header = Adw.HeaderBar()
         header.set_title_widget(self.page_title)
+        self.sidebar_toggle = Gtk.ToggleButton(icon_name="sidebar-show-symbolic",
+                                               tooltip_text=_("Toggle sidebar"), visible=False)
+        header.pack_start(self.sidebar_toggle)
         self.back_button = Gtk.Button(icon_name="go-previous-symbolic", tooltip_text=_("Back (Backspace)"), visible=False)
         self.back_button.connect("clicked", lambda *_: self.go_back())
         header.pack_start(self.back_button)
@@ -281,38 +261,46 @@ class SettingsManager(Adw.Application):
         view.set_content(self.toasts)
 
         self.sidebar = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE, css_classes=["sm-sidebar"])
-        self.sidebar.set_size_request(220, -1)
         self.sidebar_rows = {}
-        for key, name, icon in PAGES:
-            row = Gtk.ListBoxRow()
-            row.page = key
-            box = Gtk.Box(spacing=10)
-            box.append(Gtk.Image(icon_name=icon))
-            box.append(label(_(name)))
-            if key == "updates":
-                self.updates_pill = label("", ("sm-pill",))
-                self.updates_pill.set_visible(False)
-                self.updates_pill.set_hexpand(True)
-                self.updates_pill.set_halign(Gtk.Align.END)
-                box.append(self.updates_pill)
-            row.set_child(box)
-            self.sidebar.append(row)
-            self.sidebar_rows[key] = row
+        self.updates_pill = None
         # Navigation on activation (click, Enter), not selection: GTK selects the focused row again
         # when the window gets the focus, which would jump back from any other page.
         self.sidebar.connect("row-activated", self.on_sidebar)
-        side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        side.append(self.sidebar)
+        self.rebuild_sidebar()
 
-        content = Gtk.Box()
-        content.append(side)
-        content.append(view)
-        window.set_content(content)
+        sidebar_scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True,
+                                            css_classes=["sm-sidebar-scroll"])
+        sidebar_scroll.set_child(self.sidebar)
+
+        self.split_view = Adw.OverlaySplitView(
+            sidebar_position=Gtk.PackType.START,
+            min_sidebar_width=220,
+            max_sidebar_width=260,
+            show_sidebar=True,
+        )
+        self.split_view.set_sidebar(sidebar_scroll)
+        self.split_view.set_content(view)
+        self.split_view.bind_property(
+            "show-sidebar", self.sidebar_toggle, "active",
+            GObject.BindingFlags.BIDIRECTIONAL | GObject.BindingFlags.SYNC_CREATE,
+        )
+
+        cond = Adw.BreakpointCondition.parse("max-width: 720sp")
+        bp = Adw.Breakpoint.new(cond)
+        bp.add_setter(self.split_view, "collapsed", True)
+        bp.add_setter(self.sidebar_toggle, "visible", True)
+        window.add_breakpoint(bp)
+
+        window.set_content(self.split_view)
 
         self.build_plugins_page()
         self.build_detail_page()
         self.build_bar_page()
         self.build_updates_page()
+        self.system_pages = SystemPages(self)
+        self.system_pages.build_all(self.stack)
+        self.desktop_pages = DesktopPages(self)
+        self.desktop_pages.build_all(self.stack)
         self.build_settings_page()
 
         Gtk.Settings.get_default().set_property("gtk-enable-primary-paste", False)
@@ -322,6 +310,154 @@ class SettingsManager(Adw.Application):
         keys.connect("key-pressed", self.on_key)
         window.add_controller(keys)
         self.show_page("plugins")
+
+    # --- sidebar -------------------------------------------------------------------------------
+
+    def sidebar_pages(self) -> list[str]:
+        return [item for item in self.settings["sidebar_order"] if item in PAGE_MAP]
+
+    def rebuild_sidebar(self):
+        if self._sidebar_popover is not None:
+            if self._sidebar_popover.get_parent() is not None:
+                self._sidebar_popover.unparent()
+            self._sidebar_popover = None
+        clear(self.sidebar)
+        self.sidebar_rows = {}
+        order = self.settings["sidebar_order"]
+        for idx, item in enumerate(order):
+            if item == SEPARATOR:
+                row = Gtk.ListBoxRow(selectable=False, activatable=False, css_classes=["sm-sep"])
+                row.page = ""
+                sep = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL, valign=Gtk.Align.CENTER)
+                row.set_child(sep)
+            else:
+                key, name, icon = PAGE_MAP[item]
+                row = Gtk.ListBoxRow()
+                row.page = key
+                box = Gtk.Box(spacing=10)
+                box.append(Gtk.Image(icon_name=icon))
+                box.append(label(_(name)))
+                if key == "updates":
+                    self.updates_pill = label(str(self._pending_updates) if self._pending_updates else "", ("sm-pill",))
+                    self.updates_pill.set_visible(self._pending_updates > 0)
+                    self.updates_pill.set_hexpand(True)
+                    self.updates_pill.set_halign(Gtk.Align.END)
+                    box.append(self.updates_pill)
+                row.set_child(box)
+                self.sidebar_rows[key] = row
+            self._attach_sidebar_dnd(row, idx)
+            self._attach_sidebar_menu(row, idx, is_sep=(item == SEPARATOR))
+            self.sidebar.append(row)
+        current = self.current_page() if getattr(self, "stack", None) is not None else ""
+        selected = self.sidebar_rows.get(current)
+        if selected is not None:
+            self.sidebar.select_row(selected)
+
+    def _apply_sidebar_order(self, order: list[str]):
+        normalized = normalize_sidebar_order(order)
+        self.set_setting("sidebar_order", normalized)
+        GLib.idle_add(self._rebuild_sidebar_idle)
+
+    def _rebuild_sidebar_idle(self):
+        self.rebuild_sidebar()
+        return False
+
+    def _add_sidebar_sep(self, index: int):
+        order = list(self.settings["sidebar_order"])
+        if 0 <= index < len(order) - 1 and order[index + 1] != SEPARATOR:
+            order.insert(index + 1, SEPARATOR)
+            self._apply_sidebar_order(order)
+
+    def _remove_sidebar_sep(self, index: int):
+        order = list(self.settings["sidebar_order"])
+        if 0 <= index < len(order) and order[index] == SEPARATOR:
+            order.pop(index)
+            self._apply_sidebar_order(order)
+
+    def _attach_sidebar_dnd(self, row: Gtk.ListBoxRow, index: int):
+        source = Gtk.DragSource(actions=Gdk.DragAction.MOVE)
+        source.connect("prepare", lambda _s, _x, _y, i=index: Gdk.ContentProvider.new_for_value(f"sidebar:{i}"))
+
+        def begin(src, _drag):
+            src.set_icon(Gtk.WidgetPaintable.new(row), 20, 12)
+            row.add_css_class("sm-dragging")
+
+        source.connect("drag-begin", begin)
+        source.connect("drag-end", lambda *_: row.remove_css_class("sm-dragging"))
+        row.add_controller(source)
+
+        target = Gtk.DropTarget.new(str, Gdk.DragAction.MOVE)
+        # Only our own rows: text dragged in from another app is refused.
+        target.connect("accept", lambda _t, drop: drop.get_drag() is not None)
+        target.connect("enter", lambda *_: (row.add_css_class("sm-drop"), Gdk.DragAction.MOVE)[1])
+        target.connect("leave", lambda *_: row.remove_css_class("sm-drop"))
+
+        def dropped(_target, value, _x, _y, to_index=index):
+            row.remove_css_class("sm-drop")
+            text = str(value)
+            if not text.startswith("sidebar:"):
+                return False
+            raw_idx = text[len("sidebar:"):]
+            if not raw_idx.isdigit():
+                return False
+            from_index = int(raw_idx)
+            order = list(self.settings["sidebar_order"])
+            if from_index < 0 or from_index >= len(order) or to_index < 0 or to_index >= len(order):
+                return False
+            if from_index == to_index:
+                return True
+            moved = order.pop(from_index)
+            order.insert(to_index, moved)
+            self._apply_sidebar_order(order)
+            return True
+
+        target.connect("drop", dropped)
+        row.add_controller(target)
+
+    def _attach_sidebar_menu(self, row: Gtk.ListBoxRow, index: int, is_sep: bool):
+        click = Gtk.GestureClick(button=Gdk.BUTTON_SECONDARY)
+
+        def pressed(gesture, _n_press, x, y):
+            gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+            if self._sidebar_popover is not None and self._sidebar_popover.get_parent() is not None:
+                self._sidebar_popover.unparent()
+            popover = Gtk.Popover(has_arrow=False)
+            popover.set_parent(row)
+            rect = Gdk.Rectangle()
+            rect.x, rect.y, rect.width, rect.height = int(x), int(y), 1, 1
+            popover.set_pointing_to(rect)
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            box.set_margin_top(4)
+            box.set_margin_bottom(4)
+
+            def item(text, callback, sensitive=True):
+                btn = Gtk.Button(label=text, css_classes=["flat"], sensitive=sensitive)
+                btn.get_child().set_xalign(0)
+                btn.connect("clicked", lambda *_: (popover.popdown(), callback()))
+                box.append(btn)
+
+            order = list(self.settings["sidebar_order"])
+            if is_sep:
+                item(_("Remove this separator"), lambda: self._remove_sidebar_sep(index))
+            else:
+                can_add = index < len(order) - 1 and order[index + 1] != SEPARATOR
+                item(_("Add a separator below"), lambda: self._add_sidebar_sep(index), sensitive=can_add)
+            item(_("Default order"), lambda: self._apply_sidebar_order(list(DEFAULT_SIDEBAR_ORDER)))
+            popover.set_child(box)
+            self._sidebar_popover = popover
+
+            def cleanup(p):
+                if p.get_parent() is not None:
+                    p.unparent()
+                if self._sidebar_popover is p:
+                    self._sidebar_popover = None
+                return False
+
+            popover.connect("closed", lambda p: GLib.idle_add(cleanup, p))
+            popover.popup()
+
+        click.connect("pressed", pressed)
+        row.add_controller(click)
 
     def on_active(self, window, _param):
         if not window.is_active():
@@ -336,6 +472,9 @@ class SettingsManager(Adw.Application):
         if keyval == Gdk.KEY_Escape:
             if typing and isinstance(focus, Gtk.Text) and focus.get_text():
                 return False                       # the search entry clears itself first
+            if self.split_view.get_collapsed() and self.split_view.get_show_sidebar():
+                self.split_view.set_show_sidebar(False)
+                return True
             if self.current_page() == "detail" or self.current_page() != "plugins":
                 self.go_back() if self.current_page() == "detail" else self.show_page("plugins")
             else:
@@ -349,15 +488,29 @@ class SettingsManager(Adw.Application):
         if keyval == Gdk.KEY_BackSpace and not typing and self.current_page() == "detail":
             self.go_back()
             return True
-        if ctrl and Gdk.KEY_1 <= keyval < Gdk.KEY_1 + len(PAGES):
-            self.show_page(PAGES[keyval - Gdk.KEY_1][0])
+        if ctrl and Gdk.KEY_1 <= keyval <= Gdk.KEY_9:
+            pages = self.sidebar_pages()
+            idx = keyval - Gdk.KEY_1
+            if idx < len(pages):
+                self.show_page(pages[idx])
+            return True
+        if ctrl and keyval == Gdk.KEY_comma:
+            self.show_page("settings")
             return True
         if ctrl and keyval in (Gdk.KEY_f, Gdk.KEY_F):
             self.show_page("plugins")
             self.plugin_search.grab_focus()
             return True
         if ctrl and keyval in (Gdk.KEY_r, Gdk.KEY_R) or keyval == Gdk.KEY_F5:
-            self.reload()
+            current = self.current_page()
+            if current in SystemPages.PAGE_KEYS:
+                self.loaded_pages.add(current)
+                self.system_pages.refresh(current)
+            elif current in DesktopPages.PAGE_KEYS:
+                self.loaded_pages.add(current)
+                self.desktop_pages.refresh(current)
+            else:
+                self.reload()
             return True
         return False
 
@@ -365,21 +518,36 @@ class SettingsManager(Adw.Application):
         return self.stack.get_visible_child_name() or "plugins"
 
     def show_page(self, key: str):
+        if key != "detail" and key not in PAGE_MAP:
+            return
         self.stack.set_visible_child_name(key)
         self.back_button.set_visible(key == "detail")
-        titles = {k: _(n) for k, n, _i in PAGES}
         if key == "detail":
             plugin = self.plugin(self.detail_id)
             self.page_title.set_text(plugin["name"] if plugin else _("Plugin"))
         else:
-            self.page_title.set_text(titles.get(key, ""))
+            self.page_title.set_text(_(PAGE_MAP[key][1]))
             row = self.sidebar_rows.get(key)
             if row is not None and self.sidebar.get_selected_row() is not row:
                 self.sidebar.select_row(row)
+        if getattr(self, "split_view", None) is not None and self.split_view.get_collapsed():
+            self.split_view.set_show_sidebar(False)
+        if key not in self.loaded_pages:
+            if key in SystemPages.PAGE_KEYS:
+                self.loaded_pages.add(key)
+                self.system_pages.refresh(key)
+            elif key in DesktopPages.PAGE_KEYS:
+                self.loaded_pages.add(key)
+                self.desktop_pages.refresh(key)
 
     def on_sidebar(self, _box, row):
-        if row is not None and row.page != self.current_page():
-            self.show_page(row.page)
+        page = getattr(row, "page", "") if row is not None else ""
+        if not page:
+            return
+        if page != self.current_page():
+            self.show_page(page)
+        elif self.split_view.get_collapsed():
+            self.split_view.set_show_sidebar(False)
 
     def go_back(self):
         self.show_page(getattr(self, "detail_from", "plugins"))
@@ -477,17 +645,32 @@ class SettingsManager(Adw.Application):
         guard_text_fields(widget, self)
 
     def toast(self, text: str):
-        toast = Adw.Toast(title=GLib.markup_escape_text(text), timeout=4)
+        toast = Adw.Toast(title=escape(text), timeout=4)
         self.toasts.add_toast(toast)
 
     def offer_shell_restart(self, text: str):
         """After an update: a bar widget's new code only loads with a fresh shell."""
-        toast = Adw.Toast(title=GLib.markup_escape_text(text), timeout=10, button_label=_("Restart the shell"))
+        toast = Adw.Toast(title=escape(text), timeout=10, button_label=_("Restart the shell"))
         toast.connect("button-clicked", lambda *_: threading.Thread(
             target=core.run, args=(["omarchy", "restart", "shell"],), kwargs={"timeout": 30}, daemon=True).start())
         self.toasts.add_toast(toast)
 
     # --- jobs ----------------------------------------------------------------------------------
+
+    def set_busy(self, busy: bool, text: str = ""):
+        """Show/hide header spinner for background page tasks (used by ui_helpers.run_async)."""
+        if busy:
+            self._busy_count += 1
+            self.spinner.set_visible(True)
+            self.spinner.start()
+            if text:
+                self.job_label.set_text(text)
+        else:
+            self._busy_count = max(0, self._busy_count - 1)
+            if self._busy_count == 0 and not self.busy:
+                self.spinner.stop()
+                self.spinner.set_visible(False)
+                self.job_label.set_text("")
 
     def job(self, text: str, work, done_text: str = "", after=None):
         """Run work() (returns a core.Result) off the GTK loop, one at a time; then reload."""
@@ -508,9 +691,10 @@ class SettingsManager(Adw.Application):
 
         def finish(result):
             self.busy = False
-            self.spinner.stop()
-            self.spinner.set_visible(False)
-            self.job_label.set_text("")
+            if self._busy_count == 0:
+                self.spinner.stop()
+                self.spinner.set_visible(False)
+                self.job_label.set_text("")
             if result.ok:
                 if done_text:
                     self.toast(done_text)
@@ -706,8 +890,8 @@ class SettingsManager(Adw.Application):
         parts = [p for p in (plugin["version"], plugin["author"], _(KIND_NAMES.get(plugin["kind"], "Plugin"))) if p]
         if plugin["places"]:
             parts.append(where_text(plugin))
-        row = Adw.ActionRow(title=GLib.markup_escape_text(plugin["name"]),
-                            subtitle=GLib.markup_escape_text(" · ".join(parts)), activatable=True)
+        row = Adw.ActionRow(title=escape(plugin["name"]),
+                            subtitle=escape(" · ".join(parts)), activatable=True)
         row.set_subtitle_lines(1)
         if plugin["firstParty"]:
             row.add_suffix(label(_("Omarchy"), ("sm-pill-dim",)))
@@ -793,14 +977,16 @@ class SettingsManager(Adw.Application):
             else:
                 self.updates_status.set_text(_("All plugins are up to date."))
         self.update_all.set_visible(len(pending) > 0)
-        self.updates_pill.set_text(str(len(pending)))
-        self.updates_pill.set_visible(len(pending) > 0)
+        self._pending_updates = len(pending)
+        if self.updates_pill is not None:
+            self.updates_pill.set_text(str(len(pending)))
+            self.updates_pill.set_visible(len(pending) > 0)
         if pending:
             group = Adw.PreferencesGroup(title=_("Updates available"))
             for plugin in pending:
                 count = self.behind[plugin["id"]]
-                row = Adw.ExpanderRow(title=GLib.markup_escape_text(plugin["name"]),
-                                      subtitle=GLib.markup_escape_text(
+                row = Adw.ExpanderRow(title=escape(plugin["name"]),
+                                      subtitle=escape(
                                           ngettext("{0} new commit", "{0} new commits", count).format(count)
                                           + (" · " + _("has local changes") if plugin.get("dirty") else "")))
                 button = Gtk.Button(label=_("Update"), valign=Gtk.Align.CENTER, css_classes=["suggested-action"])
@@ -818,16 +1004,16 @@ class SettingsManager(Adw.Application):
             group = Adw.PreferencesGroup(title=_("Couldn't check"),
                                          description=_("Their remote didn't answer (offline, or a private repository)."))
             for plugin in unknown:
-                group.add(Adw.ActionRow(title=GLib.markup_escape_text(plugin["name"]),
-                                        subtitle=GLib.markup_escape_text(plugin.get("remote", ""))))
+                group.add(Adw.ActionRow(title=escape(plugin["name"]),
+                                        subtitle=escape(plugin.get("remote", ""))))
             self.updates_list.append(group)
         nogit = [p for p in self.data["plugins"] if p["installed"] and (not p.get("git") or not p.get("remote"))]
         if nogit:
             group = Adw.PreferencesGroup(title=_("Not updatable here"),
                                          description=_("No git checkout with a remote: update these by hand."))
             for plugin in nogit:
-                group.add(Adw.ActionRow(title=GLib.markup_escape_text(plugin["name"]),
-                                        subtitle=GLib.markup_escape_text(plugin["folder"])))
+                group.add(Adw.ActionRow(title=escape(plugin["name"]),
+                                        subtitle=escape(plugin["folder"])))
             self.updates_list.append(group)
 
     # --- details -------------------------------------------------------------------------------
@@ -905,7 +1091,7 @@ class SettingsManager(Adw.Application):
 
         def fact(title, value):
             if value:
-                row = Adw.ActionRow(title=title, subtitle=GLib.markup_escape_text(str(value)))
+                row = Adw.ActionRow(title=title, subtitle=escape(value))
                 row.set_subtitle_selectable(True)
                 facts.add(row)
 
@@ -934,7 +1120,7 @@ class SettingsManager(Adw.Application):
             self.job(_("Saving {0}…").format(key), lambda: core.set_setting(plugin["id"], key, new, section, index, expected),
                      _("Saved. The widget uses it at once."))
 
-        title = GLib.markup_escape_text(key)            # names come from shell.json: plain text
+        title = escape(key)            # names come from shell.json: plain text
         if isinstance(value, bool):
             row = Adw.SwitchRow(title=title, active=value)
             row.connect("notify::active", lambda r, _p: save(r.get_active()) if r.get_active() != value else None)
@@ -960,7 +1146,7 @@ class SettingsManager(Adw.Application):
             row.connect("notify::value", changed)
             return row
         text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-        row = Adw.EntryRow(title=title if isinstance(value, str) else GLib.markup_escape_text(_("{0} (JSON)").format(key)),
+        row = Adw.EntryRow(title=title if isinstance(value, str) else escape(_("{0} (JSON)").format(key)),
                            show_apply_button=True)
         row.set_text(text)
 
@@ -1023,6 +1209,24 @@ class SettingsManager(Adw.Application):
             return wid, False, None
         return plugin["name"], plugin["installed"], plugin
 
+    def _on_bar_row_key(self, keyval, state, pid: str, section: str, index: int, plugin: dict | None) -> bool:
+        if state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.ALT_MASK):
+            return False
+        if keyval == Gdk.KEY_Left:
+            target = core.move_step(self.data["layout"], pid, section, index, -1)
+            if target is not None:
+                self.act_move(pid, section, index, *target)
+            return True
+        if keyval == Gdk.KEY_Right:
+            target = core.move_step(self.data["layout"], pid, section, index, 1)
+            if target is not None:
+                self.act_move(pid, section, index, *target)
+            return True
+        if keyval == Gdk.KEY_Delete and plugin is not None and plugin["canDisable"]:
+            self.act_take_out(plugin)
+            return True
+        return False
+
     def fill_bar(self):
         clear(self.bar_strip)
         clear(self.bar_groups)
@@ -1054,13 +1258,20 @@ class SettingsManager(Adw.Application):
             for position, entry in enumerate(entries):
                 name, mine, plugin = self.widget_name(entry["id"])
                 sub = entry["id"] if mine or plugin is None else _("Omarchy") + " · " + entry["id"]
-                row = Adw.ActionRow(title=f"{position + 1}. " + GLib.markup_escape_text(name),
-                                    subtitle=GLib.markup_escape_text(sub), activatable=plugin is not None)
+                row = Adw.ActionRow(title=f"{position + 1}. " + escape(name),
+                                    subtitle=escape(sub), activatable=plugin is not None)
                 handle = Gtk.Image(icon_name="list-drag-handle-symbolic", css_classes=["sm-dim"],
                                    tooltip_text=_("Drag to move it along the bar"))
                 row.add_prefix(handle)
                 self.drag_source(row, entry["id"], section, position, entry["index"])
                 self.drop_target(row, section, position)
+                row_keys = Gtk.EventControllerKey()
+                row_keys.connect(
+                    "key-pressed",
+                    lambda _c, kv, _code, st, pid=entry["id"], sec=section, idx=entry["index"], pl=plugin:
+                    self._on_bar_row_key(kv, st, pid, sec, idx, pl),
+                )
+                row.add_controller(row_keys)
                 if plugin is not None:
                     row.connect("activated", lambda _r, pid=entry["id"]: self.open_detail(pid))
                 row.add_suffix(self.move_buttons(entry["id"], section, entry["index"]))
@@ -1071,6 +1282,31 @@ class SettingsManager(Adw.Application):
                     row.add_suffix(out)
                 group.add(row)
             self.bar_groups.append(group)
+
+        unused = [p for p in self.data["plugins"]
+                  if p["installed"] and ("bar-widget" in p["kinds"] or p.get("isBarWidget")) and not p["places"]]
+        out_group = Adw.PreferencesGroup(
+            title=_("Not in the bar"),
+            description=(ngettext("{0} widget", "{0} widgets", len(unused)).format(len(unused))
+                         if unused else _("All installed bar widgets are in the bar.")),
+        )
+        self.drop_out_target(out_group)
+        if not unused:
+            out_group.add(Adw.ActionRow(title=_("Empty"), subtitle=_("Drag a widget here to take it out of the bar.")))
+        for plugin in unused:
+            row = Adw.ActionRow(title=escape(plugin["name"]), subtitle=escape(plugin["id"]), activatable=True)
+            handle = Gtk.Image(icon_name="list-drag-handle-symbolic", css_classes=["sm-dim"],
+                               tooltip_text=_("Drag to put in the bar"))
+            row.add_prefix(handle)
+            self.drag_source(row, plugin["id"], "out", 0, 0)
+            row.connect("activated", lambda _r, pid=plugin["id"]: self.open_detail(pid))
+            add_btn = Gtk.Button(icon_name="list-add-symbolic", css_classes=["flat"], valign=Gtk.Align.CENTER,
+                                 tooltip_text=_("Put in the bar"))
+            default_sec = plugin["defaultSection"] if plugin["defaultSection"] != "center" else ""
+            add_btn.connect("clicked", lambda _b, p=plugin, s=default_sec: self.act_put(p, s))
+            row.add_suffix(add_btn)
+            out_group.add(row)
+        self.bar_groups.append(out_group)
 
     def drag_source(self, row: Gtk.Widget, pid: str, section: str, position: int, index: int):
         """A bar row can be dragged; what travels is "id section position index" (all checked again
@@ -1096,10 +1332,22 @@ class SettingsManager(Adw.Application):
         def dropped(_target, value, _x, _y):
             widget.remove_css_class("sm-drop")
             parts = str(value).split(" ")
-            if len(parts) != 4 or not core.valid_id(parts[0]) or parts[1] not in core.SECTIONS \
+            if len(parts) != 4 or not core.valid_id(parts[0]) \
                     or not parts[2].isdigit() or not parts[3].isdigit():
                 return False
             pid, from_section, from_position, from_index = parts[0], parts[1], int(parts[2]), int(parts[3])
+            if from_section == "out":
+                plugin = self.plugin(pid)
+                if plugin is None or ("bar-widget" not in plugin["kinds"] and not plugin.get("isBarWidget")):
+                    return False
+                if plugin["inBar"] and not plugin["allowMultiple"]:
+                    return False
+                target_section = "centerEnd" if section == "center" else section
+                self.bar_selected = pid
+                self.act_put(plugin, target_section)
+                return True
+            if from_section not in core.SECTIONS:
+                return False
             entries = self.data["layout"].get(from_section, [])
             # The layout may have changed since the drag began (another tool): then nothing moves.
             if from_position >= len(entries) or entries[from_position]["id"] != pid or entries[from_position]["index"] != from_index:
@@ -1111,6 +1359,33 @@ class SettingsManager(Adw.Application):
             expected = self.shown([from_section, section])
             self.job(_("Moving…"), lambda: core.move(pid, from_section, from_index, section, index, expected))
             return True
+        target.connect("drop", dropped)
+        widget.add_controller(target)
+
+    def drop_out_target(self, widget: Gtk.Widget):
+        """Dropping a removable bar row onto 'Not in the bar' takes it out of the bar."""
+        target = Gtk.DropTarget.new(str, Gdk.DragAction.MOVE)
+        # Only our own rows: text dragged in from another app would be read without a limit.
+        target.connect("accept", lambda _t, drop: drop.get_drag() is not None)
+        target.connect("enter", lambda *_: (widget.add_css_class("sm-drop"), Gdk.DragAction.MOVE)[1])
+        target.connect("leave", lambda *_: widget.remove_css_class("sm-drop"))
+
+        def dropped(_target, value, _x, _y):
+            widget.remove_css_class("sm-drop")
+            parts = str(value).split(" ")
+            if len(parts) != 4 or not core.valid_id(parts[0]) or parts[1] not in core.SECTIONS \
+                    or not parts[2].isdigit() or not parts[3].isdigit():
+                return False
+            pid, from_section, from_position, from_index = parts[0], parts[1], int(parts[2]), int(parts[3])
+            entries = self.data["layout"].get(from_section, [])
+            if from_position >= len(entries) or entries[from_position]["id"] != pid or entries[from_position]["index"] != from_index:
+                return False
+            plugin = self.plugin(pid)
+            if plugin is None or not plugin["canDisable"]:
+                return False
+            self.act_take_out(plugin)
+            return True
+
         target.connect("drop", dropped)
         widget.add_controller(target)
 
@@ -1155,12 +1430,11 @@ class SettingsManager(Adw.Application):
 
         about = Adw.PreferencesGroup(title=_("About"))
         about.add(Adw.ActionRow(title=_("Settings Manager {0}").format(VERSION),
-                                subtitle=_("Manage the installed Omarchy plugins: bar places, settings, updates, "
-                                           "removal.")))
-        keys = Adw.ActionRow(title=_("Keys"), subtitle=_("Ctrl+1…4 pages · Ctrl+F filter · F5 reload · "
-                                                          "Backspace back · Esc back or close · F12 screenshot"))
+                                subtitle=_("Manage Omarchy plugins and Hyprland desktop settings in one window.")))
+        keys = Adw.ActionRow(title=_("Keys"), subtitle=_("Ctrl+1…9 pages · Ctrl+, settings · Ctrl+F filter · "
+                                                          "F5 reload · Backspace back · Esc back or close · F12 screenshot"))
         about.add(keys)
-        folder = Adw.ActionRow(title=_("Folder"), subtitle=GLib.markup_escape_text(str(HERE)), activatable=True)
+        folder = Adw.ActionRow(title=_("Folder"), subtitle=escape(str(HERE)), activatable=True)
         folder.connect("activated", lambda *_: self.open_folder(str(HERE)))
         about.add(folder)
         box.append(about)
