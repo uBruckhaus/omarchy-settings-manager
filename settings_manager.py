@@ -37,8 +37,12 @@ import plugins_core as core  # noqa: E402
 import screenshot  # noqa: E402
 import theme  # noqa: E402
 from i18n import N_, _, ngettext  # noqa: E402
+from pages_apps import AppsPages  # noqa: E402
 from pages_desktop import DesktopPages  # noqa: E402
+from pages_services import ServicesPages  # noqa: E402
 from pages_system import SystemPages  # noqa: E402
+from pages_theme import ThemePages  # noqa: E402
+from pages_tune import TunePages  # noqa: E402
 from ui_helpers import (  # noqa: E402, F401
     clear,
     copy_to_clipboard,
@@ -60,14 +64,22 @@ PAGES = (
     ("plugins", N_("Plugins"), "application-x-addon-symbolic"),
     ("bar", N_("Bar"), "view-grid-symbolic"),
     ("updates", N_("Updates"), "software-update-available-symbolic"),
+    ("apps", N_("Maprisma apps"), "view-app-grid-symbolic"),
+    ("system_apps", N_("System apps"), "system-software-install-symbolic"),
     ("network", N_("Network"), "network-wireless-symbolic"),
     ("bluetooth", N_("Bluetooth"), "bluetooth-active-symbolic"),
     ("appearance", N_("Appearance"), "preferences-desktop-appearance-symbolic"),
+    ("theme", N_("Theme"), "applications-graphics-symbolic"),
     ("displays", N_("Displays"), "preferences-desktop-display-symbolic"),
     ("sound", N_("Sound"), "audio-speakers-symbolic"),
+    ("notifications", N_("Notifications"), "preferences-system-notifications-symbolic"),
+    ("ai", N_("AI"), "starred-symbolic"),
+    ("voice", N_("Voice"), "audio-input-microphone-symbolic"),
     ("power", N_("Power"), "power-profile-balanced-symbolic"),
+    ("optimize", N_("Optimize"), "emblem-system-symbolic"),
     ("input", N_("Input devices"), "input-keyboard-symbolic"),
     ("applications", N_("Applications"), "preferences-desktop-apps-symbolic"),
+    ("time", N_("Time & Language"), "preferences-desktop-locale-symbolic"),
     ("about", N_("About"), "computer-symbolic"),
     ("settings", N_("Settings"), "preferences-system-symbolic"),
 )
@@ -75,8 +87,9 @@ PAGE_MAP = {key: (key, title, icon) for key, title, icon in PAGES}
 PAGE_KEYS = tuple(key for key, _title, _icon in PAGES)
 SEPARATOR = "---"
 DEFAULT_SIDEBAR_ORDER = [
-    "plugins", "bar", "updates", SEPARATOR,
-    "network", "bluetooth", "appearance", "displays", "sound", "power", "input", "applications",
+    "plugins", "bar", "updates", "apps", "system_apps", SEPARATOR,
+    "network", "bluetooth", "appearance", "theme", "displays", "sound", "notifications", "ai", "voice",
+    "power", "optimize", "input", "applications", "time",
     SEPARATOR, "about", "settings",
 ]
 
@@ -298,9 +311,11 @@ class SettingsManager(Adw.Application):
         self.build_bar_page()
         self.build_updates_page()
         self.system_pages = SystemPages(self)
-        self.system_pages.build_all(self.stack)
         self.desktop_pages = DesktopPages(self)
-        self.desktop_pages.build_all(self.stack)
+        self.page_groups = [self.system_pages, self.desktop_pages, ThemePages(self), AppsPages(self),
+                            ServicesPages(self), TunePages(self)]
+        for group in self.page_groups:
+            group.build_all(self.stack)
         self.build_settings_page()
 
         Gtk.Settings.get_default().set_property("gtk-enable-primary-paste", False)
@@ -503,12 +518,10 @@ class SettingsManager(Adw.Application):
             return True
         if ctrl and keyval in (Gdk.KEY_r, Gdk.KEY_R) or keyval == Gdk.KEY_F5:
             current = self.current_page()
-            if current in SystemPages.PAGE_KEYS:
+            group = self.page_group(current)
+            if group is not None:
                 self.loaded_pages.add(current)
-                self.system_pages.refresh(current)
-            elif current in DesktopPages.PAGE_KEYS:
-                self.loaded_pages.add(current)
-                self.desktop_pages.refresh(current)
+                group.refresh(current)
             else:
                 self.reload()
             return True
@@ -533,12 +546,17 @@ class SettingsManager(Adw.Application):
         if getattr(self, "split_view", None) is not None and self.split_view.get_collapsed():
             self.split_view.set_show_sidebar(False)
         if key not in self.loaded_pages:
-            if key in SystemPages.PAGE_KEYS:
+            group = self.page_group(key)
+            if group is not None:
                 self.loaded_pages.add(key)
-                self.system_pages.refresh(key)
-            elif key in DesktopPages.PAGE_KEYS:
-                self.loaded_pages.add(key)
-                self.desktop_pages.refresh(key)
+                group.refresh(key)
+
+    def page_group(self, key: str):
+        """The page group (SystemPages, DesktopPages, pages_base.PageGroup, …) that owns a page."""
+        for group in getattr(self, "page_groups", ()):
+            if key in group.PAGE_KEYS:
+                return group
+        return None
 
     def on_sidebar(self, _box, row):
         page = getattr(row, "page", "") if row is not None else ""

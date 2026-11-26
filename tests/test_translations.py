@@ -45,7 +45,7 @@ class TranslationCatalogTests(unittest.TestCase):
                 continue
             path = ROOT / "translations" / f"{code}.json"
             self.assertTrue(path.is_file(), f"missing {path}")
-            table = json.loads(path.read_text(encoding="utf-8"))
+            table = i18n._load_tables().get(code, {})   # <code>.json + translations/<code>/*.json
             missing_plain = sorted(k for k in plain if k not in table)
             self.assertEqual(missing_plain, [], f"{code}: missing {len(missing_plain)} keys: {missing_plain[:10]}")
             missing_plural = sorted(k for k in plural if k not in table)
@@ -77,7 +77,7 @@ class SidebarAndArgsTests(unittest.TestCase):
         self.assertEqual(len(pages), len(sm.PAGE_KEYS))
         self.assertEqual(set(pages), set(sm.PAGE_KEYS))
 
-    def test_parse_args_accepts_all_13_pages_and_rejects_unknown(self):
+    def test_parse_args_accepts_every_page_and_rejects_unknown(self):
         for key in sm.PAGE_KEYS:
             self.assertEqual(sm.parse_args(["--page", key])["page"], key)
             self.assertEqual(sm.parse_args([f"--page={key}"])["page"], key)

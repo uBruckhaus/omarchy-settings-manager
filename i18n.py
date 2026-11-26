@@ -129,13 +129,20 @@ def _load_tables() -> dict:
     for code, _name in LANGUAGES:
         if code == "en":
             continue
-        try:
-            with open(TRANSLATIONS / f"{code}.json", "rb") as handle:
-                data = json.loads(handle.read(MAX_TABLE + 1)[:MAX_TABLE])
-        except (OSError, ValueError, RecursionError):
-            continue
-        if isinstance(data, dict):
-            tables[code] = {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, (str, list))}
+        table = {}
+        # The main table, then one file per page module in translations/<code>/ (sorted), so that
+        # page modules built side by side never edit the same file.
+        parts = sorted((TRANSLATIONS / code).glob("*.json")) if (TRANSLATIONS / code).is_dir() else []
+        for path in [TRANSLATIONS / f"{code}.json", *parts]:
+            try:
+                with open(path, "rb") as handle:
+                    data = json.loads(handle.read(MAX_TABLE + 1)[:MAX_TABLE])
+            except (OSError, ValueError, RecursionError):
+                continue
+            if isinstance(data, dict):
+                table.update({k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, (str, list))})
+        if table:
+            tables[code] = table
     return tables
 
 
