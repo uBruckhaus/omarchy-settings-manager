@@ -85,6 +85,23 @@ a row to add or remove custom separators or restore the default order. On narrow
 - **About**: hardware, OS, kernel, Omarchy version, compositor and session facts with one-click copy.
 - **Settings**: language (8 built in), update check on opening, Omarchy's own plugins in the list,
   Corners (like the windows, slightly rounded, rounded, square), F12 screenshot key, and app details.
+- **Maprisma apps**: the Maprisma apps on this computer (release archive in `~/.local/lib`, AppImage in
+  `~/Applications`, pacman package, or built from source), with version, a *running* mark and an update
+  mark from each app's latest GitHub release (asked on page load / Refresh only, unauthenticated, cached
+  10 min). ⋮ menu: Open, Details, Show folder, GitHub/release page, remove older AppImage copies (to the
+  trash). Updates and uninstalls of installed apps open **Maprisma Settings** at its Apps page (it swaps
+  running apps safely). Catalog apps that aren't installed and have a release AppImage get **Install**:
+  a visible terminal downloads the AppImage into `~/Applications`, checks GitHub's SHA-256 and never
+  replaces a file (Maprisma Launcher's method). No password needed.
+- **System apps**: every app with a launcher, by source: System packages (explicitly installed pacman
+  packages), AUR, Flatpak, AppImages (older copies grouped), Web apps (Omarchy's and browsers') and
+  Local apps (other launchers, Omarchy TUIs). Marks for updates (`checkupdates`, `yay`/`paru -Qua`,
+  `flatpak remote-ls --updates`), running and start at login; filter; Details (`pacman -Qi`,
+  `flatpak info`). **Needs the admin password** (asked in the terminal, by sudo): Uninstall of a package
+  (`omarchy-pkg-drop`) and Update all / Update the system (`omarchy-update`, Omarchy's full update: Arch
+  has no partial upgrades). Flatpak uninstall/update, web app and TUI removal (`omarchy-webapp-remove`,
+  `omarchy-tui-remove`) run in the same visible terminal without a password; AppImages and local
+  launchers go to the trash (`gio trash`). Every action asks first.
 
 Keys: `Ctrl+1…9` first nine pages in current sidebar order · `Ctrl+,` Settings · `Ctrl+F` filter
 plugins · `F5` / `Ctrl+R` reload current page · `Backspace` back from plugin details · `Esc` close
@@ -177,6 +194,7 @@ with its process group. Text from manifests and system tools is cleaned before i
 - `network_core.py`: Wi-Fi, Wired, VPN, LAN devices and network monitor backend
 - `theme.py`: colours from the current Omarchy theme, followed live; `corners.py`: the Corners setting
 - `screenshot.py`: the F12 key
+- `pages_apps.py`, `apps_core.py`: Maprisma apps and System apps pages and their backend
 - `i18n.py`, `translations/`: interface languages
 - Settings: `~/.config/omarchy/settings-manager/settings.json`
 
