@@ -62,6 +62,18 @@ a row to add or remove custom separators or restore the default order. On narrow
 - **Power**: power profiles (`powerprofilesctl`), the Omarchy shell's screensaver and lock timers
   (`idle.screensaver` / `idle.lock` in `~/.config/omarchy/shell.json`, 0 = off) and Stay awake
   (`omarchy toggle idle`).
+- **Optimize**: read-only view of Omarchy's pinned pacman mirrors (`/etc/pacman.d/mirrorlist` and
+  `/etc/pacman.conf`; ranking in a visible terminal is only offered if the system does not use
+  Omarchy-pinned mirrors), system DNS provider via `omarchy dns` (`DHCP`, `Cloudflare`, `Google`,
+  or `Custom` in a visible terminal) with a lightweight DNS latency test, TCP BBR congestion control
+  (`/etc/sysctl.d/99-zz-settings-manager-network.conf`), Wi-Fi power saving via NetworkManager, and
+  BlueZ options in `/etc/bluetooth/main.conf` (`FastConnectable`, `Experimental`, `AutoEnable`,
+  `ReconnectAttempts`). *Needs administrator password* (polkit/`pkexec`, only on explicit clicks)
+  for changing DNS, toggling TCP BBR, modifying Wi-Fi power saving, and saving/restarting Bluetooth.
+- **Time & Language**: automatic date and time (NTP) and searchable time zone picker via
+  `timedatectl`, plus system language (`LANG`) and regional formats (`LC_TIME`, `LC_NUMERIC`,
+  `LC_MONETARY`, `LC_MEASUREMENT`, `LC_PAPER`) via `localectl` (listing only generated locales).
+  *Needs administrator password* (polkit, via `timedatectl`/`localectl`, only on explicit changes).
 - **Input devices**: keyboard layout, Caps Lock behaviour, repeat rate/delay, mouse and touchpad
   sensitivity, natural scroll and tap-to-click for Hyprland.
 - **Applications**: default applications (`xdg-mime`) for web, files, mail, media and text, plus
