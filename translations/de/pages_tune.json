@@ -82,7 +82,6 @@
   "System mirrors, DNS, TCP congestion control, Wi-Fi power saving, and Bluetooth options.": "System-Spiegelserver, DNS, TCP-Überlastungssteuerung, WLAN-Energiesparmodus und Bluetooth-Optionen.",
   "TCP BBR disabled.": "TCP BBR deaktiviert.",
   "TCP BBR enabled.": "TCP BBR aktiviert.",
-  "TCP BBR setting saved; takes effect after restart.": "TCP-BBR-Einstellung gespeichert; wird nach dem Neustart wirksam.",
   "Test": "Testen",
   "Test DNS speed": "DNS-Geschwindigkeit testen",
   "Testing DNS resolvers…": "DNS-Resolver werden getestet…",
@@ -117,5 +116,6 @@
   "\u0004{0} mirror": [
     "{0} Spiegelserver",
     "{0} Spiegelserver"
-  ]
+  ],
+  "Saved, but Bluetooth could not be restarted; it applies after the next restart.": "Gespeichert, aber Bluetooth konnte nicht neu gestartet werden; es gilt nach dem nächsten Neustart."
 }

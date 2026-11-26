@@ -24,9 +24,7 @@ import shutil
 import socket
 import stat
 import struct
-import subprocess
 import tempfile
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -165,7 +163,7 @@ _BT_INSTALL_SCRIPT = (
     'trap \'cleanup; exit 130\' INT\n'
     'trap \'cleanup; exit 143\' TERM\n'
     'trap \'cleanup; exit 129\' HUP\n'
-    '/usr/bin/install -m 0600 -o 0 -g 0 -- "$src" "$tmp"\n'
+    '/usr/bin/head -c 262145 -- "$src" > "$tmp"\n'   # bounded copy into the root-only 0600 temp
     'if ! printf \'%s  %s\\n\' "$hash" "$tmp" | /usr/bin/sha256sum -c --status -; then\n'
     '  printf "Verification failed: staged file checksum mismatch.\\n" >&2\n'
     '  exit 4\n'
@@ -174,7 +172,7 @@ _BT_INSTALL_SCRIPT = (
     '/usr/bin/mv -f -- "$tmp" "$target"\n'
     'trap - EXIT INT TERM HUP\n'
     'if [ -x /usr/bin/systemctl ]; then\n'
-    '  /usr/bin/systemctl try-restart bluetooth.service\n'
+    '  /usr/bin/systemctl try-restart bluetooth.service || exit 5\n'
     'fi\n'
 )
 
@@ -359,33 +357,8 @@ def _resolve_usr_bin(name: str) -> str | None:
 
 
 def launch(argv: list[str], timeout: float = LAUNCH_TIMEOUT) -> tuple[bool, str]:
-    """Start a program that opens its own window (e.g. a floating terminal) detached and return.
-
-    Fixed argv, no shell, no inherited pipes, own session; a process still running after
-    ``timeout`` is normal (its window is open) and is reaped on a daemon thread.
-    """
-    if not argv or not argv[0] or not all(isinstance(a, str) and "\x00" not in a for a in argv):
-        return False, "invalid command"
-    program = argv[0] if os.path.isabs(argv[0]) else shutil.which(argv[0])
-    if program is None:
-        return False, f"{argv[0]}: not found"
-    try:
-        proc = subprocess.Popen(
-            [program, *argv[1:]],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-            close_fds=True,
-        )
-    except OSError as exc:
-        return False, str(exc)
-    try:
-        code = proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        threading.Thread(target=proc.wait, daemon=True).start()
-        return True, ""
-    return (True, "") if code == 0 else (False, f"exit {code}")
+    """Detached start of a window (shared: plugins_core.launch)."""
+    return core.launch(argv, timeout)
 
 
 def _terminal_argv(command: list[str]) -> list[str] | None:
@@ -1265,7 +1238,7 @@ def set_bluetooth_option(key: str, value) -> tuple[bool, str]:
 
     Stages the updated content in a ``0700`` temp directory and invokes a constant root script
     with ``<staged>`` and its SHA-256 hex digest as positional arguments. As root, the script
-    rejects non-regular or symlinked sources, copies with ``install -m 0600`` to a temp file in
+    rejects non-regular or symlinked sources, copies at most 256 KiB with ``head -c`` to a root-only temp file in
     ``/etc/bluetooth``, verifies the digest via ``sha256sum`` (removing the temp file on mismatch),
     then ``chmod 0644``, atomically ``mv``s into place, and runs ``systemctl try-restart``.
     """
@@ -1307,6 +1280,8 @@ def set_bluetooth_option(key: str, value) -> tuple[bool, str]:
             [pkexec_path, "/bin/sh", "-c", _BT_INSTALL_SCRIPT, "sh", str(staged_path), digest],
             timeout=POLKIT_TIMEOUT,
         )
+    if res.code == 5:              # main.conf is saved; only the Bluetooth restart failed
+        return True, "restart-failed"
     if not res.ok:
         return False, _err_text(res, pkexec=True)
     return True, ""

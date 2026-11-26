@@ -495,10 +495,10 @@ class CommandTests(Sandbox):
 
             def wait(self, timeout=None):
                 if self.code is None and timeout is not None:
-                    raise ac.subprocess.TimeoutExpired("x", timeout)
+                    raise core.subprocess.TimeoutExpired("x", timeout)
                 return self.code
 
-        with mock.patch.object(ac.subprocess, "Popen", return_value=Proc(0)) as popen:
+        with mock.patch.object(core.subprocess, "Popen", return_value=Proc(0)) as popen:
             self.assertEqual(ac.run_in_terminal(["omarchy-update"]), (True, ""))
             argv = popen.call_args.args[0]
             kwargs = popen.call_args.kwargs
@@ -506,16 +506,16 @@ class CommandTests(Sandbox):
             self.assertEqual(argv[-1], "omarchy-update")
             self.assertTrue(kwargs["start_new_session"])
             for stream in ("stdin", "stdout", "stderr"):
-                self.assertIs(kwargs[stream], ac.subprocess.DEVNULL)
+                self.assertIs(kwargs[stream], core.subprocess.DEVNULL)
             self.assertEqual(ac.run_in_terminal(["bad\ncommand"]), (False, "invalid command"))
             self.assertEqual(ac.launch(None), (False, "nothing to start"))
             self.assertEqual(ac.launch(["uwsm-app", "a\x00b"]), (False, "invalid command"))
             self.assertEqual(popen.call_count, 1)
-        with mock.patch.object(ac.subprocess, "Popen", return_value=Proc(None)):
+        with mock.patch.object(core.subprocess, "Popen", return_value=Proc(None)):
             self.assertEqual(ac.launch(["uwsm-app", "x"]), (True, ""))          # still running: its window
-        with mock.patch.object(ac.subprocess, "Popen", return_value=Proc(1)):
+        with mock.patch.object(core.subprocess, "Popen", return_value=Proc(1)):
             self.assertEqual(ac.launch(["uwsm-app", "x"]), (False, "uwsm-app: exit 1"))
-        with mock.patch.object(ac.subprocess, "Popen", side_effect=OSError("denied")):
+        with mock.patch.object(core.subprocess, "Popen", side_effect=OSError("denied")):
             self.assertEqual(ac.launch(["uwsm-app", "x"]), (False, "denied"))
         self.tools.discard("uwsm-app")
         self.assertEqual(ac.launch(["uwsm-app", "x"]), (False, "uwsm-app: not found"))

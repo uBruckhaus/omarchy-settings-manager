@@ -21,7 +21,6 @@ import re
 import shlex
 import shutil
 import stat
-import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -799,27 +798,15 @@ def open_argv(app: dict, extra: tuple = ()) -> list[str] | None:
 
 
 def launch(argv: list[str] | None, timeout: float = 2.0) -> tuple[bool, str]:
-    """Start a program that opens a window of its own (an app, the Omarchy terminal) and returns
-    or keeps running. Not through plugins_core.run: a window must not hold our pipes (run would wait
-    for them and end the group at its deadline). Fixed argv, no shell, no inherited pipes, its own
-    session; still running after `timeout` is fine (its window is open) and is reaped in the
-    background. (The integrator moves this into a shared plugins_core.launch.)"""
-    if not argv or not all(_safe_arg(a) for a in argv):
-        return False, "nothing to start" if not argv else "invalid command"
-    program = argv[0] if os.path.isabs(argv[0]) else _which(argv[0])
-    if program is None:
-        return False, f"{argv[0]}: not found"
-    try:
-        proc = subprocess.Popen([program, *argv[1:]], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
-    except OSError as exc:
-        return False, str(exc)
-    try:
-        code = proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        threading.Thread(target=proc.wait, daemon=True).start()
-        return True, ""
-    return (True, "") if code == 0 else (False, f"{argv[0]}: exit {code}")
+    """Detached start of a window (shared: plugins_core.launch); None = no command could be built."""
+    if not argv:
+        return False, "nothing to start"
+    if isinstance(argv[0], str) and argv[0] and not os.path.isabs(argv[0]):
+        found = _which(argv[0])          # this module's tool lookup (one place to fake in tests)
+        if found is None:
+            return False, f"{argv[0]}: not found"
+        argv = [found, *argv[1:]]
+    return core.launch(argv, timeout)
 
 
 def run_in_terminal(command: list[str] | None) -> tuple[bool, str]:

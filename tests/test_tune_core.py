@@ -65,7 +65,7 @@ class MirrorsAndLaunchTest(unittest.TestCase):
         # Fast exit 0 -> (True, "")
         fake_proc = mock.MagicMock()
         fake_proc.wait.return_value = 0
-        with mock.patch.object(tc.subprocess, "Popen", return_value=fake_proc) as popen:
+        with mock.patch.object(core.subprocess, "Popen", return_value=fake_proc) as popen:
             ok, err = tc.launch(["/usr/bin/true"])
         self.assertTrue(ok, err)
         kwargs = popen.call_args.kwargs
@@ -78,14 +78,14 @@ class MirrorsAndLaunchTest(unittest.TestCase):
         # Still running after timeout (window opened) -> (True, "") and reaped in background
         running_proc = mock.MagicMock()
         running_proc.wait.side_effect = [subprocess.TimeoutExpired(["x"], 2.0), 0]
-        with mock.patch.object(tc.subprocess, "Popen", return_value=running_proc):
+        with mock.patch.object(core.subprocess, "Popen", return_value=running_proc):
             ok, err = tc.launch(["/usr/bin/true"], timeout=0.01)
         self.assertTrue(ok, err)
 
         # Immediate non-zero exit -> (False, "exit 2")
         bad_proc = mock.MagicMock()
         bad_proc.wait.return_value = 2
-        with mock.patch.object(tc.subprocess, "Popen", return_value=bad_proc):
+        with mock.patch.object(core.subprocess, "Popen", return_value=bad_proc):
             ok, err = tc.launch(["/usr/bin/false"])
         self.assertFalse(ok)
         self.assertIn("exit 2", err)
@@ -782,6 +782,14 @@ class BluetoothTuneTest(unittest.TestCase):
                 self.assertFalse(ok)
                 self.assertIn("Cancelled", err)
                 self.assertEqual(run.call_count, 1)
+
+            # Saved but the Bluetooth restart failed (script exit 5) -> ok with "restart-failed"
+            with (
+                mock.patch.object(tc, "BT_MAIN_CONF", bt_conf),
+                mock.patch.object(tc.shutil, "which", return_value="/usr/bin/pkexec"),
+                mock.patch.object(core, "run", return_value=core.Result(5, "", "Job failed")),
+            ):
+                self.assertEqual(tc.set_bluetooth_option("FastConnectable", True), (True, "restart-failed"))
 
             # Non-UTF-8 bytes in main.conf refused before pkexec
             bt_conf.write_bytes(b"[General]\n# caf\xe9\n#FastConnectable = false\n")

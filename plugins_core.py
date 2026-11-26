@@ -151,6 +151,29 @@ def _cut(data: bytes, max_bytes: int) -> str:
     return (data or b"")[:max_bytes].decode("utf-8", "replace")
 
 
+def launch(argv: list, timeout: float = 2.0) -> tuple[bool, str]:
+    """Start a program that opens a window of its own (an Omarchy floating terminal, an app, another
+    settings window) and return: `run()` would wait for its pipes, which the window keeps open. Fixed
+    argv, no shell, no inherited pipes, its own session; a launcher still running after `timeout`
+    is fine (its window is open) and is reaped on a daemon thread. Callers validate the argv."""
+    if not argv or not argv[0] or not all(isinstance(a, str) and "\x00" not in a for a in argv):
+        return False, "invalid command"
+    program = argv[0] if os.path.isabs(argv[0]) else shutil.which(argv[0])
+    if program is None:
+        return False, f"{argv[0]}: not found"
+    try:     # the user's own environment and language: the window is theirs
+        proc = subprocess.Popen([program, *argv[1:]], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+    except OSError as exc:
+        return False, str(exc)
+    try:
+        code = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        threading.Thread(target=proc.wait, daemon=True).start()
+        return True, ""
+    return (True, "") if code == 0 else (False, f"{os.path.basename(argv[0])}: exit {code}")
+
+
 def shell_call(method: str, *args: str, timeout: float = 10.0) -> Result:
     """One `omarchy-shell shell <method> …` IPC call."""
     return run(["omarchy-shell", "shell", method, *args], timeout=timeout)

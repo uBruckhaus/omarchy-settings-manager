@@ -441,10 +441,7 @@ class TunePages(PageGroup):
             def _after(res) -> None:
                 ok, msg = _unpack_result(res)
                 if ok:
-                    if msg == "reboot":
-                        self.app.toast(_("TCP BBR setting saved; takes effect after restart."))
-                    else:
-                        self.app.toast(_("TCP BBR enabled.") if want else _("TCP BBR disabled."))
+                    self.app.toast(_("TCP BBR enabled.") if want else _("TCP BBR disabled."))
                 else:
                     self.app.toast(msg or _("Could not update TCP congestion control."))
 
@@ -701,7 +698,9 @@ class TunePages(PageGroup):
 
             def _after(res) -> None:
                 ok, err = _unpack_result(res)
-                if ok:
+                if ok and err == "restart-failed":
+                    self.app.toast(_("Saved, but Bluetooth could not be restarted; it applies after the next restart."))
+                elif ok:
                     self.app.toast(_("Saved; Bluetooth restarted."))
                 else:
                     self.app.toast(err or _("Could not update Bluetooth settings."))
