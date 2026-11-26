@@ -103,3 +103,53 @@ test instance from handing off to a running Settings Manager (same app id on the
 5. While debugging I once sent SIGSEGV to my own Broadway test instance (to dump Python stacks), around
    22:20: a core dump / "Process crashed" notification for `python3` may exist from that. Nothing of
    Uwe's real session was involved.
+
+## Round 1 fixes (Antigravity review, `docs/reviews/a-theme.md`)
+
+Every claim was checked against the code or with crafted inputs before fixing. All 13 were real;
+none was dismissed. (The earlier text above still says `omarchy theme set`, 40 tests and in-process
+decoding; the current state is below.)
+
+- **H1, post-scan JPEG metadata (confirmed):** an APP1 EXIF segment after the scan survived
+  `safe_image` and glycin read it (`orientation` = 6). As suggested, decoding now runs in a
+  **short-lived child process** (`python3 -E -s theme_core.py --thumbnail -- <path> <w> <h>` through
+  `plugins_core.run`). The child sets its own limits (2 GiB address space, 20 s CPU), there is a 25 s
+  timeout, and the parent checks the base64 pixel answer (size, channels, length). A decoder abort,
+  loop or memory spike now costs one picture, not the app. Two decoders run at a time; a child starts
+  in about 60 ms, and all 31 cards fill in about 2–3 s. On top of that, the JPEG check now walks every
+  scan to EOI (stuffed bytes, restart markers), so metadata after any scan is dropped. It also accepts
+  one SOF only and needs an EOI. All 176 real theme images still pass. The crafted file now decodes
+  with orientation 1.
+- **H2, dispatcher routing (confirmed):** `omarchy theme set gnome` resolves to
+  `omarchy-theme-set-gnome` (19 such hook names). Apply now runs `omarchy-theme-set <slug>` directly,
+  `can_apply` looks for that binary, and the current-theme fallback runs `omarchy-theme-current`
+  directly.
+- **M3, dispose:** `RatioBin` and `SideBySide` now chain up to `Gtk.Widget.do_dispose`.
+- **M4, memory:** decode memory is now bounded by the child's limits. The PNG IHDR must be exactly 13
+  bytes, and the decoded size is never more than twice the asked size on either side, so panoramas
+  stay small.
+- **M5, symlinked images:** listing and the cache key use `lstat`, like the `O_NOFOLLOW` read, so a
+  linked image is never listed (rule 4).
+- **M6, refresh:** `_render` resets the big preview state (`_hide_big`), so its wallpaper list and
+  swatch are rebuilt from the new list.
+- **M7, late answers:** `_refresh_current` carries a generation. An answer is dropped when newer or
+  while applying, and `_render` bumps the generation.
+- **L8:** a card's wallpaper flip only lands while the pointer is still on the card.
+- **L9:** hiding the big preview (empty filter, error, refresh) cancels its timer and clears its list.
+- **L10:** WebP needs exactly one VP8X and one frame, and the canvas and frame sizes must agree.
+  The decoder must report the checked size exactly once (`agreed == [True]`), which replaces the old
+  `width <= 1` test.
+- **L11:** Theme Manager's plugin folder must be owned by the user and not group/other-writable.
+- **L12:** the current theme from `omarchy-theme-current` must be an existing theme folder
+  (it prints "Unknown" without a theme.name).
+- **L13:** the reaper-thread traceback is gone (`side_effect=[TimeoutExpired, 0]`). New regression
+  tests cover post-scan and progressive JPEG metadata, a missing EOI or second SOF, WebP size
+  mismatch, double VP8X, a double frame, IHDR length, symlinked images inside the roots, set-hook
+  theme names, "Unknown", a writable plugin folder, the child decoder's argv and answer checks, and one
+  real child decode of a stock preview (skipped without one).
+
+Tests: `tests/test_theme_core.py` 53, full suite 157 OK. Checked offscreen on Broadway :11: the page
+renders with child decoding, and in the harness refresh keeps the selection and rebuilds the big
+preview (5 wallpapers), the empty Light filter hides the preview with its timer stopped, and 33 images
+decoded with 0 failures. One CDP screenshot call hung after two Refresh clicks. The app log showed no
+error, and the same path was then verified in-process.

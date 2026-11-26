@@ -59,7 +59,7 @@ a row to add or remove custom separators or restore the default order. On narrow
   grid under a big preview of the selected one: rest the pointer on a card, click it or use the arrow
   keys (else the theme in use is shown). The preview steps through the theme's wallpapers with ‹ ›
   (and once by itself after Theme Manager's delay, when animations are on) beside its name, dark/light
-  mode, colours and **Apply theme**; double-click or Enter applies too (`omarchy theme set <name>`, no
+  mode, colours and **Apply theme**; double-click or Enter applies too (`omarchy-theme-set <name>`, no
   password). Dark/Light/All narrows the grid; the theme in use is framed with a check. When Theme
   Manager is installed its favourites get a star, its hidden themes stay out until the eye button
   shows them (both read only), and **More in Theme Manager…** opens it. Only JPEG, PNG and still WebP
