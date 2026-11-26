@@ -1,0 +1,49 @@
+{
+ "Loading themes…": "Caricamento dei temi…",
+ "Click a theme to preview it; double-click or Enter uses it.": "Fai clic su un tema per l’anteprima; doppio clic o Invio lo usa.",
+ "The themes could not be read.": "Impossibile leggere i temi.",
+ "No themes shown.": "Nessun tema mostrato.",
+ "Favourite in Theme Manager": "Preferito in Theme Manager",
+ "All": "Tutti",
+ "Dark": "Scuro",
+ "Light": "Chiaro",
+ "More in Theme Manager…": "Altro in Theme Manager…",
+ "Wallpapers, favourites, new themes and more": "Sfondi, preferiti, nuovi temi e altro",
+ "Previous picture": "Immagine precedente",
+ "Next picture": "Immagine successiva",
+ "Apply theme": "Applica tema",
+ "Try again": "Riprova",
+ "Your theme": "Il tuo tema",
+ "Stock theme": "Tema incluso",
+ "hidden in Theme Manager": "nascosto in Theme Manager",
+ "In use": "In uso",
+ "The omarchy command was not found.": "Comando omarchy non trovato.",
+ "The omarchy command was not found: themes can be looked at here, not applied.": "Comando omarchy non trovato: qui i temi si possono vedere, non applicare.",
+ "No themes found in ~/.config/omarchy/themes or /usr/share/omarchy/themes.": "Nessun tema trovato in ~/.config/omarchy/themes o /usr/share/omarchy/themes.",
+ "No dark themes shown.": "Nessun tema scuro mostrato.",
+ "No light themes shown.": "Nessun tema chiaro mostrato.",
+ "Applying…": "Applicazione…",
+ "unknown error": "errore sconosciuto",
+ "Could not read the themes.": "Impossibile leggere i temi.",
+ "Applying {0}…": "Applicazione di {0}…",
+ "{0} is the theme now": "{0} è ora il tema",
+ "Could not apply {0}: {1}": "Impossibile applicare {0}: {1}",
+ "Could not open Theme Manager: {0}": "Impossibile aprire Theme Manager: {0}",
+ "In use: {0}": "In uso: {0}",
+ "\u0004{0} theme": [
+  "{0} tema",
+  "{0} temi"
+ ],
+ "\u0004Show the {0} theme hidden in Theme Manager": [
+  "Mostra il {0} tema nascosto in Theme Manager",
+  "Mostra i {0} temi nascosti in Theme Manager"
+ ],
+ "\u0004{0} is hidden in Theme Manager; the eye button shows it.": [
+  "{0} è nascosto in Theme Manager; il pulsante dell’occhio lo mostra.",
+  "{0} sono nascosti in Theme Manager; il pulsante dell’occhio li mostra."
+ ],
+ "\u0004{0} wallpaper (‹ › on the picture)": [
+  "{0} sfondo (‹ › sull’immagine)",
+  "{0} sfondi (‹ › sull’immagine)"
+ ]
+}
