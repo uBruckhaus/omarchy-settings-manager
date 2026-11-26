@@ -227,4 +227,70 @@ and `services_core.launch` (C). `uwsm-app -t service` returns at once, so B's
 `core.run(argv, timeout=15)` would do. The no-`uwsm-app` fallback (`tune_core.py:306-308`) is the
 only reason for a detached Popen. Integrator item: keep one shared launcher in `plugins_core.py`.
 
-NOT CLEAN
+NOT CLEAN (round 2)
+
+## Round 3
+
+Checked: `git diff 616333c..task/d-tune` (22685aa, 69d4f10). Full suite: 127 tests OK. The three
+constant scripts were extracted from `tune_core.py` and run as a normal user against temp
+directories. The only edits for that run: paths substituted, `-o 0 -g 0` dropped, and
+`sysctl`/`systemctl` stubbed with `echo`. No pkexec or sudo was used.
+
+- `sh -n`: all three scripts parse. The Python string concatenation yields one single-quoted
+  `printf` format, and every value is used only as a quoted `"$1"`/`"$2"`/`"$tmp"`.
+- Results of the run:
+
+  | Script | Input | Result |
+  |---|---|---|
+  | BT install | good path | target replaced, mode 644, no temp left, restart runs |
+  | BT install | checksum mismatch | exit 4, target unchanged, temp removed by the EXIT trap |
+  | BT install | staged symlink (to `/etc/passwd`) or `/dev/null` | exit 3 before any copy |
+  | BT install | hash `abc;rm -rf /` or uppercase hex | exit 2 |
+  | BBR write | `fq bbr` | exact 3-line drop-in, mode 644, no temp left |
+  | BBR write | `fq bbr;id` or `fq_codel bbr` | exit 2 |
+  | BBR write | missing args | `set -u` aborts |
+  | BBR remove | `fq bbr` | drop-in deleted, sysctl runs |
+
+- The `remove_dropin = enable == _other_sysctl_sets_bbr()` logic is correct in all four cases.
+  On this machine (Omarchy sets bbr+fq): "off" writes cubic/fq_codel, and "on" removes our file.
+
+### Round-2 findings
+
+N1. **Fixed.**
+- One `pkexec /bin/sh -c <constant> sh <args>` call per action: BBR (`tune_core.py:1114-1120`),
+  Bluetooth (`tune_core.py:1305-1309`). The script text has no formatting, and pkexec is resolved
+  to `/usr/bin`.
+- BBR has no staged file at all. Bluetooth copies into a root-only `mktemp` file (0600) and checks
+  the SHA-256 as root before `chmod 0644`/`mv`, so a swapped source (symlink, other file) can never
+  become readable or active.
+- A cancelled prompt runs nothing (the staging dir is removed by Python). A mismatch or any error
+  before `mv` removes the temp file (EXIT/INT/TERM/HUP traps).
+- A symlinked staging directory is not followed by root either: it sits in sticky `/tmp`, and
+  `fs.protected_symlinks=1` is set.
+
+N2. **Not fixed (Low, integrator):** `launch()` still bypasses `plugins_core.run`. It is left for
+the shared-launcher consolidation, as agreed.
+
+### New findings (Low only)
+
+R3-1. **Low: a race between the source check and the copy allows an unbounded root copy.**
+`_BT_INSTALL_SCRIPT` checks `[ -f "$1" ] && [ ! -L "$1" ]` and then runs
+`install -- "$src" "$tmp"`. A same-user process spinning renames between a regular file and a
+symlink to `/dev/zero` can win that window. GNU `install` copies `/dev/zero` without a limit (as a
+normal user here: 1.4 GB in 0.3 s), and core.run's timeout can't stop the root process. The result
+is a full root filesystem. No disclosure (the checksum fails, and the 0600 temp file is removed
+afterwards). On this machine `/home` is on the same btrfs as `/`, so that user could already fill
+the disk; that is why this is Low.
+Fix: copy with a cap instead of `install`:
+`/usr/bin/head -c 262145 -- "$src" > "$tmp"` (the temp file is already 0600 from mktemp), then
+the existing hash check.
+
+R3-2. **Low: a failed Bluetooth restart is reported as a failed save.**
+If `systemctl try-restart` fails after the `mv` (`_BT_INSTALL_SCRIPT` last lines), the script exits
+non-zero and the toast says the update failed, although `main.conf` was saved. Return a distinct
+exit code (e.g. 5) and show "saved; restart Bluetooth failed". Also, `pages_tune.py` still handles
+`set_bbr`'s old `"reboot"` result, which can no longer occur (dead branch).
+
+No High or Medium finding is open.
+
+CLEAN
