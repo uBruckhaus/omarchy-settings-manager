@@ -150,15 +150,11 @@ def _json_out(result: core.Result):
         return None
 
 
-def _bool(value) -> bool:
-    return value is True
-
-
 def which(command: str) -> str | None:
     return shutil.which(command) if PLAIN_NAME_RE.match(command or "") else None
 
 
-def launch(argv: list, timeout: float = 5.0) -> tuple[bool, str]:
+def launch(argv: list, timeout: float = 2.0) -> tuple[bool, str]:
     """Start a program that opens a window of its own (an Omarchy floating terminal, a settings
     window) and returns, or keeps running with it. Fixed argv, no shell, no inherited pipes (the
     window must not hold ours), its own session; a launcher still running after `timeout` is fine
@@ -168,11 +164,9 @@ def launch(argv: list, timeout: float = 5.0) -> tuple[bool, str]:
     program = argv[0] if os.path.isabs(argv[0]) else shutil.which(argv[0])
     if program is None:
         return False, f"{argv[0]}: not found"
-    env = dict(os.environ)
-    env["LC_ALL"] = "C.UTF-8"
-    try:
+    try:     # the user's own environment and language: the window is theirs
         proc = subprocess.Popen([program, *argv[1:]], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True, env=env)
+                                stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
     except OSError as exc:
         return False, str(exc)
     try:
@@ -1036,7 +1030,7 @@ def voxtype_settings(part: str = "config") -> tuple[bool, str]:
 
 def superwhisper_settings() -> tuple[bool, str]:
     """Superwhisper's own settings window."""
-    return launch(["superwhisper", "settings"], timeout=10)
+    return launch(["superwhisper", "settings"])
 
 
 def _sw_run(argv: list) -> tuple[bool, str]:
