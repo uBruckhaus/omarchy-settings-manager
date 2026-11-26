@@ -55,6 +55,15 @@ a row to add or remove custom separators or restore the default order. On narrow
 - **Bluetooth**: adapter power, scan, pair/connect/disconnect, trust and remove Bluetooth devices via
   `bluetoothctl`.
 - **Appearance**: Omarchy themes, wallpapers, font/cursor settings and Hyprland look & animations.
+- **Theme**: Omarchy's themes (yours in `~/.config/omarchy/themes` first, then the stock ones) in a
+  grid under a big preview of the selected one: rest the pointer on a card, click it or use the arrow
+  keys (else the theme in use is shown). The preview steps through the theme's wallpapers with ‹ ›
+  (and once by itself after Theme Manager's delay, when animations are on) beside its name, dark/light
+  mode, colours and **Apply theme**; double-click or Enter applies too (`omarchy theme set <name>`, no
+  password). Dark/Light/All narrows the grid; the theme in use is framed with a check. When Theme
+  Manager is installed its favourites get a star, its hidden themes stay out until the eye button
+  shows them (both read only), and **More in Theme Manager…** opens it. Only JPEG, PNG and still WebP
+  pictures are shown (checked, size-capped, metadata removed before decoding).
 - **Displays**: live Hyprland monitor layout, resolution, refresh rate, scale, transform, position
   and VRR via `hyprctl` with opt-in persistence.
 - **Sound**: PipeWire/PulseAudio output and input devices, volumes, mute switches and per-app streams
