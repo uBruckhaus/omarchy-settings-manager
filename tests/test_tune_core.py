@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
+import stat
 import struct
 import subprocess
 import sys
@@ -47,26 +50,12 @@ def _which_map(mapping: dict[str, str | None]):
     return lambda name: mapping.get(name)
 
 
-def _simulate_root_file_ops(argv: list[str], *, tamper: bytes | None = None, captured: list[str] | None = None):
-    """Emulate pkexec install/mv/rm on temp test directories (never touches real system paths)."""
-    if argv[:2] == ["pkexec", "/usr/bin/install"]:
-        src = Path(argv[-2])
-        dst = Path(argv[-1])
-        data = src.read_bytes()
-        if captured is not None:
-            captured.append(data.decode("utf-8", "replace"))
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        dst.write_bytes(tamper if tamper is not None else data)
-        return core.Result(0, "")
-    if argv[:4] == ["pkexec", "/usr/bin/mv", "-f", "--"]:
-        Path(argv[4]).replace(Path(argv[5]))
-        return core.Result(0, "")
-    if argv[:4] == ["pkexec", "/usr/bin/rm", "-f", "--"]:
-        target = Path(argv[4])
-        if target.exists() or target.is_symlink():
-            target.unlink()
-        return core.Result(0, "")
-    return None
+def _sandbox_script(script: str, *, replacements: list[tuple[str, str]]) -> str:
+    """Adapt a constant root script for unprivileged execution in a temp dir (tests only)."""
+    out = script
+    for old, new in replacements:
+        out = out.replace(old, new)
+    return out
 
 
 # --- 1. Mirrors & detached terminal launch tests -------------------------------------------------
@@ -442,7 +431,7 @@ class NetworkTuneTest(unittest.TestCase):
             res_stub = tc.test_dns_latency("127.0.0.53")
         self.assertNotIn("current", res_stub["results"])
 
-    def test_set_bbr_atomic_verified_runtime_sysctl_and_symlink_refusal(self):
+    def test_set_bbr_single_pkexec_constant_script_and_validations(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             sys_sysctl_dir = root / "usr_sysctl.d"
@@ -450,44 +439,37 @@ class NetworkTuneTest(unittest.TestCase):
             sysctl_dir = root / "sysctl.d"
             sysctl_dir.mkdir()
             bbr_file = sysctl_dir / "99-zz-settings-manager-network.conf"
-            captured_contents: list[str] = []
 
-            def fake_run(argv, **_kw):
-                sim = _simulate_root_file_ops(argv, captured=captured_contents)
-                if sim is not None:
-                    return sim
-                return core.Result(0, "")
-
+            # Without Omarchy's 99-omarchy-sysctl.conf:
+            # - enable=True writes drop-in + applies in ONE pkexec call
+            # - enable=False removes drop-in + applies in ONE pkexec call
             with (
                 mock.patch.object(tc, "SYSCTL_SYSTEM_DIR", sys_sysctl_dir),
                 mock.patch.object(tc, "SYSCTL_DIR", sysctl_dir),
                 mock.patch.object(tc, "SYSCTL_BBR_FILE", bbr_file),
                 mock.patch.object(tc.shutil, "which", side_effect=_which_map({"pkexec": "/usr/bin/pkexec"})),
-                mock.patch.object(core, "run", side_effect=fake_run) as run,
+                mock.patch.object(core, "run", return_value=core.Result(0, "")) as run,
             ):
                 ok, err = tc.set_bbr(True)
                 self.assertTrue(ok, err)
-                self.assertIn("net.ipv4.tcp_congestion_control = bbr", bbr_file.read_text(encoding="utf-8"))
-                self.assertIn("net.core.default_qdisc = fq", bbr_file.read_text(encoding="utf-8"))
-                argvs = [c[0][0] for c in run.call_args_list]
-                self.assertEqual(argvs[0][:8], ["pkexec", "/usr/bin/install", "-D", "-m", "0644", "-o", "0", "-g"])
-                self.assertTrue(argvs[0][-1].endswith(".99-zz-settings-manager-network.conf.sm-tmp"))
-                self.assertEqual(argvs[1][:4], ["pkexec", "/usr/bin/mv", "-f", "--"])
-                self.assertEqual(argvs[2], [
-                    "pkexec", "/usr/bin/sysctl", "-q", "-w",
-                    "net.core.default_qdisc=fq", "net.ipv4.tcp_congestion_control=bbr",
-                ])
+                self.assertEqual(run.call_count, 1)
+                self.assertEqual(
+                    run.call_args[0][0],
+                    ["/usr/bin/pkexec", "/bin/sh", "-c", tc._BBR_WRITE_SCRIPT, "sh", "fq", "bbr"],
+                )
 
                 run.reset_mock()
                 ok, err = tc.set_bbr(False)
                 self.assertTrue(ok, err)
-                self.assertIn("net.ipv4.tcp_congestion_control = cubic", bbr_file.read_text(encoding="utf-8"))
-                self.assertEqual(run.call_args_list[-1][0][0], [
-                    "pkexec", "/usr/bin/sysctl", "-q", "-w",
-                    "net.core.default_qdisc=fq_codel", "net.ipv4.tcp_congestion_control=cubic",
-                ])
+                self.assertEqual(run.call_count, 1)
+                self.assertEqual(
+                    run.call_args[0][0],
+                    ["/usr/bin/pkexec", "/bin/sh", "-c", tc._BBR_REMOVE_SCRIPT, "sh", "fq_codel", "cubic"],
+                )
 
-            # When Omarchy's 99-omarchy-sysctl.conf already sets BBR+fq, turning BBR on removes our drop-in
+            # With Omarchy's 99-omarchy-sysctl.conf setting BBR+fq:
+            # - enable=False writes override drop-in + applies in ONE pkexec call
+            # - enable=True removes our override drop-in + applies in ONE pkexec call
             (sysctl_dir / "99-omarchy-sysctl.conf").write_text(
                 "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\n", encoding="utf-8"
             )
@@ -495,18 +477,25 @@ class NetworkTuneTest(unittest.TestCase):
                 mock.patch.object(tc, "SYSCTL_SYSTEM_DIR", sys_sysctl_dir),
                 mock.patch.object(tc, "SYSCTL_DIR", sysctl_dir),
                 mock.patch.object(tc, "SYSCTL_BBR_FILE", bbr_file),
-                mock.patch.object(tc.shutil, "which", return_value="/usr/bin/pkexec"),
-                mock.patch.object(core, "run", side_effect=fake_run) as run,
+                mock.patch.object(tc.shutil, "which", side_effect=_which_map({"pkexec": "/usr/bin/pkexec"})),
+                mock.patch.object(core, "run", return_value=core.Result(0, "")) as run,
             ):
+                ok, err = tc.set_bbr(False)
+                self.assertTrue(ok, err)
+                self.assertEqual(run.call_count, 1)
+                self.assertEqual(
+                    run.call_args[0][0],
+                    ["/usr/bin/pkexec", "/bin/sh", "-c", tc._BBR_WRITE_SCRIPT, "sh", "fq_codel", "cubic"],
+                )
+
+                run.reset_mock()
                 ok, err = tc.set_bbr(True)
                 self.assertTrue(ok, err)
-                self.assertFalse(bbr_file.exists())
-                argvs = [c[0][0] for c in run.call_args_list]
-                self.assertEqual(argvs[0], ["pkexec", "/usr/bin/rm", "-f", "--", str(bbr_file)])
-                self.assertEqual(argvs[1], [
-                    "pkexec", "/usr/bin/sysctl", "-q", "-w",
-                    "net.core.default_qdisc=fq", "net.ipv4.tcp_congestion_control=bbr",
-                ])
+                self.assertEqual(run.call_count, 1)
+                self.assertEqual(
+                    run.call_args[0][0],
+                    ["/usr/bin/pkexec", "/bin/sh", "-c", tc._BBR_REMOVE_SCRIPT, "sh", "fq", "bbr"],
+                )
 
             # Symlink target refused without invoking pkexec
             other = root / "other"
@@ -524,47 +513,96 @@ class NetworkTuneTest(unittest.TestCase):
                 self.assertIn("symlink", err.lower())
                 run.assert_not_called()
 
-        # Non-bool rejected
-        for bad in (1, 0, "true", None):
-            self.assertFalse(tc.set_bbr(bad)[0])
-
-    def test_set_bbr_readback_mismatch_removes_temp_and_aborts(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            sys_sysctl_dir = root / "usr_sysctl.d"
-            sys_sysctl_dir.mkdir()
-            sysctl_dir = root / "sysctl.d"
-            sysctl_dir.mkdir()
-            bbr_file = sysctl_dir / "99-zz-settings-manager-network.conf"
-            tmp_file = sysctl_dir / ".99-zz-settings-manager-network.conf.sm-tmp"
-
-            def fake_run(argv, **_kw):
-                sim = _simulate_root_file_ops(argv, tamper=b"kernel.core_pattern=|/tmp/evil\n")
-                if sim is not None:
-                    return sim
-                return core.Result(0, "")
-
+            # pkexec outside /usr/bin refused
+            bbr_file.unlink()
             with (
                 mock.patch.object(tc, "SYSCTL_SYSTEM_DIR", sys_sysctl_dir),
                 mock.patch.object(tc, "SYSCTL_DIR", sysctl_dir),
                 mock.patch.object(tc, "SYSCTL_BBR_FILE", bbr_file),
-                mock.patch.object(tc.shutil, "which", return_value="/usr/bin/pkexec"),
-                mock.patch.object(core, "run", side_effect=fake_run) as run,
+                mock.patch.object(tc.shutil, "which", return_value="/home/uwe/.local/bin/pkexec"),
+                mock.patch.object(core, "run") as run,
             ):
-                ok, err = tc.set_bbr(False)
+                ok, _err = tc.set_bbr(True)
                 self.assertFalse(ok)
-                self.assertIn("match", err.lower())
-                self.assertFalse(tmp_file.exists())
-                self.assertFalse(bbr_file.exists())
-                argvs = [c[0][0] for c in run.call_args_list]
-                self.assertEqual(argvs[0][:2], ["pkexec", "/usr/bin/install"])
-                self.assertEqual(argvs[1], ["pkexec", "/usr/bin/rm", "-f", "--", str(tmp_file)])
-                # Neither mv nor sysctl was ever called
-                for argv in argvs:
-                    self.assertNotIn("/usr/bin/mv", argv)
-                    self.assertNotIn("/usr/bin/sysctl", argv)
+                run.assert_not_called()
 
-    def test_set_bbr_pkexec_cancelled_and_partial_reboot_state(self):
+        # Non-bool / hostile values rejected before pkexec
+        with mock.patch.object(core, "run") as run:
+            for bad in (1, 0, "true", "fq; id", None, ["bbr"]):
+                self.assertFalse(tc.set_bbr(bad)[0], repr(bad))
+            run.assert_not_called()
+
+    def test_bbr_scripts_syntax_hostile_args_and_sandbox_execution(self):
+        # Syntax check exact constant scripts with /bin/sh -n
+        for script in (tc._BBR_WRITE_SCRIPT, tc._BBR_REMOVE_SCRIPT):
+            chk = subprocess.run(["/bin/sh", "-n", "-c", script], capture_output=True, text=True)
+            self.assertEqual(chk.returncode, 0, chk.stderr)
+
+            # Hostile positional args rejected by case statement (exit 2) before touching /etc
+            for bad_qdisc, bad_cc in (
+                ("fq; id", "bbr"),
+                ("fq", "bbr\nkernel.core_pattern=|/tmp/x"),
+                ("fq", "cubic"),
+                ("fq_codel", "bbr"),
+                ("", ""),
+            ):
+                res = subprocess.run(
+                    ["/bin/sh", "-c", script, "sh", bad_qdisc, bad_cc],
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(res.returncode, 2, f"{bad_qdisc!r}/{bad_cc!r}: {res.stderr}")
+
+        # Execute sandboxed copy of scripts in a temp dir (no privilege needed)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sysctl_dir = root / "sysctl.d"
+            sysctl_log = root / "sysctl.log"
+            fake_sysctl = root / "fake-sysctl"
+            fake_sysctl.write_text(
+                f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{sysctl_log}"\n',
+                encoding="utf-8",
+            )
+            fake_sysctl.chmod(0o755)
+
+            repls = [
+                ("/etc/sysctl.d", str(sysctl_dir)),
+                ("/usr/bin/sysctl", str(fake_sysctl)),
+            ]
+            write_script = _sandbox_script(tc._BBR_WRITE_SCRIPT, replacements=repls)
+            remove_script = _sandbox_script(tc._BBR_REMOVE_SCRIPT, replacements=repls)
+
+            res = subprocess.run(["/bin/sh", "-c", write_script, "sh", "fq", "bbr"], capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            target = sysctl_dir / "99-zz-settings-manager-network.conf"
+            self.assertTrue(target.is_file())
+            self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o644)
+            text = target.read_text(encoding="utf-8")
+            self.assertIn("net.core.default_qdisc = fq\n", text)
+            self.assertIn("net.ipv4.tcp_congestion_control = bbr\n", text)
+            # No leftover temp files
+            self.assertEqual([p.name for p in sysctl_dir.iterdir()], [target.name])
+            self.assertIn("-q -w net.core.default_qdisc=fq net.ipv4.tcp_congestion_control=bbr", sysctl_log.read_text())
+
+            # Remove script deletes drop-in and applies cubic/fq_codel
+            res2 = subprocess.run(
+                ["/bin/sh", "-c", remove_script, "sh", "fq_codel", "cubic"],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(res2.returncode, 0, res2.stderr)
+            self.assertFalse(target.exists())
+            self.assertIn("-q -w net.core.default_qdisc=fq_codel net.ipv4.tcp_congestion_control=cubic", sysctl_log.read_text())
+
+            # Symlink target inside script exits 3 and leaves link target untouched
+            secret = root / "secret"
+            secret.write_text("keep", encoding="utf-8")
+            target.symlink_to(secret)
+            res3 = subprocess.run(["/bin/sh", "-c", write_script, "sh", "fq", "bbr"], capture_output=True, text=True)
+            self.assertEqual(res3.returncode, 3)
+            self.assertEqual(secret.read_text(encoding="utf-8"), "keep")
+
+    def test_set_bbr_pkexec_cancelled(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             sys_sysctl_dir = root / "usr_sysctl.d"
@@ -573,38 +611,17 @@ class NetworkTuneTest(unittest.TestCase):
             sysctl_dir.mkdir()
             bbr_file = sysctl_dir / "99-zz-settings-manager-network.conf"
 
-            # Cancel on first prompt -> False with "Cancelled"
             with (
                 mock.patch.object(tc, "SYSCTL_SYSTEM_DIR", sys_sysctl_dir),
                 mock.patch.object(tc, "SYSCTL_DIR", sysctl_dir),
                 mock.patch.object(tc, "SYSCTL_BBR_FILE", bbr_file),
                 mock.patch.object(tc.shutil, "which", return_value="/usr/bin/pkexec"),
-                mock.patch.object(core, "run", return_value=core.Result(126, "", "dismissed")),
+                mock.patch.object(core, "run", return_value=core.Result(126, "", "dismissed")) as run,
             ):
                 ok, err = tc.set_bbr(False)
                 self.assertFalse(ok)
                 self.assertIn("Cancelled", err)
-
-            # Cancel on runtime sysctl -w after drop-in installed -> (True, "reboot")
-            def fake_run_cancel_apply(argv, **_kw):
-                sim = _simulate_root_file_ops(argv)
-                if sim is not None:
-                    return sim
-                if argv[:2] == ["pkexec", "/usr/bin/sysctl"]:
-                    return core.Result(126, "", "dismissed")
-                return core.Result(0, "")
-
-            with (
-                mock.patch.object(tc, "SYSCTL_SYSTEM_DIR", sys_sysctl_dir),
-                mock.patch.object(tc, "SYSCTL_DIR", sysctl_dir),
-                mock.patch.object(tc, "SYSCTL_BBR_FILE", bbr_file),
-                mock.patch.object(tc.shutil, "which", return_value="/usr/bin/pkexec"),
-                mock.patch.object(core, "run", side_effect=fake_run_cancel_apply),
-            ):
-                ok, msg = tc.set_bbr(False)
-                self.assertTrue(ok)
-                self.assertEqual(msg, "reboot")
-                self.assertTrue(bbr_file.exists())
+                self.assertEqual(run.call_count, 1)
 
     def test_set_wifi_powersave_reapply_failure_is_reconnect_info(self):
         eth_uuid = "11111111-2222-3333-4444-555555555555"
@@ -679,16 +696,19 @@ class BluetoothTuneTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             tc.update_bluetooth_conf(SAMPLE_BT_CONF, "General", "FastConnectable", "true\nExec=evil")
 
-    def test_read_and_set_bluetooth_option_atomic(self):
+    def test_read_and_set_bluetooth_option_single_pkexec(self):
         with tempfile.TemporaryDirectory() as tmp:
             bt_conf = Path(tmp) / "main.conf"
             bt_conf.write_text(SAMPLE_BT_CONF, encoding="utf-8")
-            staged_text: list[str] = []
+            seen_staged: list[tuple[Path, bytes, int, int, str]] = []
 
             def fake_run(argv, **_kw):
-                sim = _simulate_root_file_ops(argv, captured=staged_text)
-                if sim is not None:
-                    return sim
+                staged = Path(argv[5])
+                raw = staged.read_bytes()
+                dir_mode = stat.S_IMODE(staged.parent.stat().st_mode)
+                file_mode = stat.S_IMODE(staged.stat().st_mode)
+                seen_staged.append((staged, raw, dir_mode, file_mode, argv[6]))
+                bt_conf.write_bytes(raw)
                 return core.Result(0, "")
 
             with (
@@ -708,48 +728,60 @@ class BluetoothTuneTest(unittest.TestCase):
 
                 ok, err = tc.set_bluetooth_option("Experimental", True)
                 self.assertTrue(ok, err)
-                self.assertIn("Experimental = true\n", bt_conf.read_text(encoding="utf-8"))
-                argvs = [c[0][0] for c in run.call_args_list]
-                self.assertEqual(argvs[0][:2], ["pkexec", "/usr/bin/install"])
-                self.assertTrue(argvs[0][-1].endswith(".main.conf.sm-tmp"))
-                self.assertEqual(argvs[1][:4], ["pkexec", "/usr/bin/mv", "-f", "--"])
-                self.assertEqual(argvs[2], ["systemctl", "try-restart", "bluetooth.service"])
+                # Exactly ONE pkexec call (no separate mv or systemctl call)
+                self.assertEqual(run.call_count, 1)
+                argv = run.call_args[0][0]
+                self.assertEqual(argv[:5], ["/usr/bin/pkexec", "/bin/sh", "-c", tc._BT_INSTALL_SCRIPT, "sh"])
+                self.assertEqual(len(argv), 7)
 
+                staged, raw, dir_mode, file_mode, digest = seen_staged[-1]
+                self.assertEqual(dir_mode, 0o700)
+                self.assertEqual(file_mode, 0o600)
+                self.assertEqual(hashlib.sha256(raw).hexdigest(), digest)
+                self.assertIn(b"Experimental = true\n", raw)
+                # Staged dir cleaned up immediately after return
+                self.assertFalse(staged.exists())
+                self.assertFalse(staged.parent.exists())
+
+                run.reset_mock()
                 ok, err = tc.set_bluetooth_option("ReconnectAttempts", 15)
                 self.assertTrue(ok, err)
+                self.assertEqual(run.call_count, 1)
                 self.assertIn("ReconnectAttempts = 15\n", bt_conf.read_text(encoding="utf-8"))
 
-    def test_bluetooth_readback_mismatch_and_non_utf8_refused(self):
+    def test_bluetooth_mismatch_cancel_and_non_utf8_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
             bt_conf = Path(tmp) / "main.conf"
             bt_conf.write_text(SAMPLE_BT_CONF, encoding="utf-8")
-            tmp_bt = Path(tmp) / ".main.conf.sm-tmp"
+            staged_paths: list[Path] = []
 
-            def fake_run_tamper(argv, **_kw):
-                sim = _simulate_root_file_ops(argv, tamper=b"[General]\nEvil=true\n")
-                if sim is not None:
-                    return sim
-                return core.Result(0, "")
+            def fake_run_mismatch(argv, **_kw):
+                staged_paths.append(Path(argv[5]))
+                return core.Result(4, "", "Verification failed: staged file checksum mismatch.\n")
 
             with (
                 mock.patch.object(tc, "BT_MAIN_CONF", bt_conf),
-                mock.patch.object(tc.shutil, "which", side_effect=_which_map({
-                    "pkexec": "/usr/bin/pkexec",
-                    "systemctl": "/usr/bin/systemctl",
-                })),
-                mock.patch.object(core, "run", side_effect=fake_run_tamper) as run,
+                mock.patch.object(tc.shutil, "which", return_value="/usr/bin/pkexec"),
+                mock.patch.object(core, "run", side_effect=fake_run_mismatch) as run,
             ):
                 ok, err = tc.set_bluetooth_option("FastConnectable", True)
                 self.assertFalse(ok)
-                self.assertIn("match", err.lower())
-                # Original main.conf untouched, temp removed, bluetooth never restarted
+                self.assertIn("mismatch", err.lower())
+                self.assertEqual(run.call_count, 1)
                 self.assertEqual(bt_conf.read_text(encoding="utf-8"), SAMPLE_BT_CONF)
-                self.assertFalse(tmp_bt.exists())
-                argvs = [c[0][0] for c in run.call_args_list]
-                self.assertEqual(argvs[1], ["pkexec", "/usr/bin/rm", "-f", "--", str(tmp_bt)])
-                for argv in argvs:
-                    self.assertNotIn("/usr/bin/mv", argv)
-                    self.assertNotIn("systemctl", argv)
+                self.assertFalse(staged_paths[-1].exists())
+                self.assertFalse(staged_paths[-1].parent.exists())
+
+            # Polkit cancel -> False with "Cancelled", 1 call, staged dir cleaned up
+            with (
+                mock.patch.object(tc, "BT_MAIN_CONF", bt_conf),
+                mock.patch.object(tc.shutil, "which", return_value="/usr/bin/pkexec"),
+                mock.patch.object(core, "run", return_value=core.Result(126, "", "dismissed")) as run,
+            ):
+                ok, err = tc.set_bluetooth_option("FastConnectable", True)
+                self.assertFalse(ok)
+                self.assertIn("Cancelled", err)
+                self.assertEqual(run.call_count, 1)
 
             # Non-UTF-8 bytes in main.conf refused before pkexec
             bt_conf.write_bytes(b"[General]\n# caf\xe9\n#FastConnectable = false\n")
@@ -762,6 +794,88 @@ class BluetoothTuneTest(unittest.TestCase):
                 self.assertFalse(ok)
                 self.assertIn("utf-8", err.lower())
                 run.assert_not_called()
+
+    def test_bluetooth_script_syntax_symlink_refusal_and_checksum_mismatch(self):
+        # Exact constant script passes /bin/sh -n
+        chk = subprocess.run(["/bin/sh", "-n", "-c", tc._BT_INSTALL_SCRIPT], capture_output=True, text=True)
+        self.assertEqual(chk.returncode, 0, chk.stderr)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            valid_src = root / "staged.conf"
+            valid_content = b"[General]\nFastConnectable = true\n"
+            valid_src.write_bytes(valid_content)
+            good_hash = hashlib.sha256(valid_content).hexdigest()
+
+            # Unmodified script rejects hostile / malformed sha256 args (exit 2) before touching /etc
+            for bad_hash in ("", "abc", "Z" * 64, good_hash[:63] + ";", f"{good_hash}  /etc/shadow"):
+                res = subprocess.run(
+                    ["/bin/sh", "-c", tc._BT_INSTALL_SCRIPT, "sh", str(valid_src), bad_hash],
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(res.returncode, 2, f"{bad_hash!r}: {res.stderr}")
+
+            # Unmodified script rejects symlinked source and non-regular source (exit 3) before touching /etc
+            link_src = root / "link.conf"
+            link_src.symlink_to(valid_src)
+            dir_src = root / "dir.conf"
+            dir_src.mkdir()
+            for bad_src in (link_src, dir_src, root / "missing.conf"):
+                res = subprocess.run(
+                    ["/bin/sh", "-c", tc._BT_INSTALL_SCRIPT, "sh", str(bad_src), good_hash],
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(res.returncode, 3, f"{bad_src}: {res.stderr}")
+
+            # Sandboxed execution of the script in a temp dir: happy path + sha256 mismatch path
+            bt_dir = root / "bluetooth"
+            bt_dir.mkdir()
+            bt_target = bt_dir / "main.conf"
+            bt_target.write_text(SAMPLE_BT_CONF, encoding="utf-8")
+            systemctl_log = root / "systemctl.log"
+            fake_systemctl = root / "fake-systemctl"
+            fake_systemctl.write_text(
+                f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{systemctl_log}"\n',
+                encoding="utf-8",
+            )
+            fake_systemctl.chmod(0o755)
+
+            sandbox_bt = _sandbox_script(
+                tc._BT_INSTALL_SCRIPT,
+                replacements=[
+                    ("/etc/bluetooth", str(bt_dir)),
+                    (" -o 0 -g 0", ""),
+                    ("/usr/bin/systemctl", str(fake_systemctl)),
+                ],
+            )
+
+            # 1. Mismatch path: wrong sha256 -> exits 4, removes temp file, leaves main.conf untouched, no restart
+            wrong_hash = "0" * 64
+            res_bad = subprocess.run(
+                ["/bin/sh", "-c", sandbox_bt, "sh", str(valid_src), wrong_hash],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(res_bad.returncode, 4, res_bad.stderr)
+            self.assertIn("mismatch", res_bad.stderr.lower())
+            self.assertEqual(bt_target.read_text(encoding="utf-8"), SAMPLE_BT_CONF)
+            # Temp file cleaned up by EXIT trap: only main.conf exists in bt_dir
+            self.assertEqual([p.name for p in bt_dir.iterdir()], ["main.conf"])
+            self.assertFalse(systemctl_log.exists())
+
+            # 2. Matching sha256: atomic 0644 replace + systemctl try-restart bluetooth.service
+            res_ok = subprocess.run(
+                ["/bin/sh", "-c", sandbox_bt, "sh", str(valid_src), good_hash],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(res_ok.returncode, 0, res_ok.stderr)
+            self.assertEqual(bt_target.read_bytes(), valid_content)
+            self.assertEqual(stat.S_IMODE(bt_target.stat().st_mode), 0o644)
+            self.assertEqual([p.name for p in bt_dir.iterdir()], ["main.conf"])
+            self.assertEqual(systemctl_log.read_text(encoding="utf-8").strip(), "try-restart bluetooth.service")
 
     def test_bluetooth_hostile_inputs_and_symlink_refused(self):
         with tempfile.TemporaryDirectory() as tmp:

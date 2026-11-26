@@ -4,15 +4,18 @@ Standard library only, no GTK, so it can be tested and used independently. Every
 runs through ``plugins_core.run`` (argument list, no shell, timeout and output cap); detached
 terminal launches run through ``launch()`` (fixed allowlisted argv, no shell, no inherited pipes,
 own session). Configuration files are read with ``O_NONBLOCK`` + ``O_NOFOLLOW`` + ``S_ISREG`` +
-byte caps, and privileged file updates stage into a private ``0700`` directory, install to a
-root-owned sibling temp file, verify byte-for-byte before atomic ``mv``, and remove the temp file
-on mismatch.
+byte caps. Privileged file updates run in a single ``pkexec /bin/sh -c <constant script> sh ...``
+step with values passed solely as positional arguments: BBR writes/removes its fixed drop-in
+directly as root (no staged file) and applies allowlisted ``sysctl -w`` values; Bluetooth copies
+its staged file to a ``0600`` root-owned temp file, verifies the SHA-256 digest before ``chmod
+0644`` + atomic ``mv``, and restarts ``bluetooth.service``.
 """
 
 from __future__ import annotations
 
 import contextlib
 import datetime
+import hashlib
 import ipaddress
 import os
 import re
@@ -77,6 +80,103 @@ DNS_ALL_PROVIDERS = ("DHCP", "Cloudflare", "Google", "Custom")
 
 _BBR_QDISCS = frozenset({"fq", "fq_codel"})
 _BBR_CONGESTION = frozenset({"bbr", "cubic"})
+_BBR_VALID_PAIRS = frozenset({("fq", "bbr"), ("fq_codel", "cubic")})
+
+# Fixed root scripts passed to ``pkexec /bin/sh -c <script> sh <positional args>``.
+# No runtime value is ever formatted into these strings; all inputs arrive via positional args and
+# are validated both in Python and inside the script.
+_BBR_WRITE_SCRIPT = (
+    'set -eu\n'
+    'qdisc="$1"\n'
+    'cc="$2"\n'
+    'case "$qdisc:$cc" in\n'
+    '  fq:bbr|fq_codel:cubic) ;;\n'
+    '  *) printf "Invalid BBR parameters.\\n" >&2; exit 2 ;;\n'
+    'esac\n'
+    'dir=/etc/sysctl.d\n'
+    'target=/etc/sysctl.d/99-zz-settings-manager-network.conf\n'
+    'if [ -L "$dir" ]; then printf "Refusing to write through a symlink.\\n" >&2; exit 3; fi\n'
+    '/usr/bin/mkdir -p -- "$dir"\n'
+    'if [ ! -d "$dir" ] || [ -L "$dir" ]; then printf "Refusing to write through a symlink.\\n" >&2; exit 3; fi\n'
+    'if [ -L "$target" ] || { [ -e "$target" ] && [ ! -f "$target" ]; }; then\n'
+    '  printf "Refusing to overwrite symlink or non-regular file.\\n" >&2\n'
+    '  exit 3\n'
+    'fi\n'
+    'tmp="$(/usr/bin/mktemp "$dir/.99-zz-settings-manager-network.conf.XXXXXX")"\n'
+    'cleanup() { /usr/bin/rm -f -- "$tmp"; }\n'
+    'trap cleanup EXIT\n'
+    'trap \'cleanup; exit 130\' INT\n'
+    'trap \'cleanup; exit 143\' TERM\n'
+    'trap \'cleanup; exit 129\' HUP\n'
+    'printf \'# Managed by Settings Manager (Optimize -> Network)\\n'
+    'net.core.default_qdisc = %s\\n'
+    'net.ipv4.tcp_congestion_control = %s\\n\' "$qdisc" "$cc" > "$tmp"\n'
+    '/usr/bin/chmod 0644 -- "$tmp"\n'
+    '/usr/bin/mv -f -- "$tmp" "$target"\n'
+    'trap - EXIT INT TERM HUP\n'
+    '/usr/bin/sysctl -q -w "net.core.default_qdisc=$qdisc" "net.ipv4.tcp_congestion_control=$cc"\n'
+)
+
+_BBR_REMOVE_SCRIPT = (
+    'set -eu\n'
+    'qdisc="$1"\n'
+    'cc="$2"\n'
+    'case "$qdisc:$cc" in\n'
+    '  fq:bbr|fq_codel:cubic) ;;\n'
+    '  *) printf "Invalid BBR parameters.\\n" >&2; exit 2 ;;\n'
+    'esac\n'
+    'dir=/etc/sysctl.d\n'
+    'target=/etc/sysctl.d/99-zz-settings-manager-network.conf\n'
+    'if [ -L "$dir" ] || [ -L "$target" ]; then\n'
+    '  printf "Refusing to modify through a symlink.\\n" >&2\n'
+    '  exit 3\n'
+    'fi\n'
+    'if [ -e "$target" ]; then\n'
+    '  if [ ! -f "$target" ]; then\n'
+    '    printf "Refusing to remove non-regular file.\\n" >&2\n'
+    '    exit 3\n'
+    '  fi\n'
+    '  /usr/bin/rm -f -- "$target"\n'
+    'fi\n'
+    '/usr/bin/sysctl -q -w "net.core.default_qdisc=$qdisc" "net.ipv4.tcp_congestion_control=$cc"\n'
+)
+
+_BT_INSTALL_SCRIPT = (
+    'set -eu\n'
+    'src="$1"\n'
+    'hash="$2"\n'
+    'case "$hash" in\n'
+    '  ""|*[!0-9a-f]*) printf "Invalid checksum.\\n" >&2; exit 2 ;;\n'
+    'esac\n'
+    'if [ "${#hash}" -ne 64 ]; then\n'
+    '  printf "Invalid checksum.\\n" >&2\n'
+    '  exit 2\n'
+    'fi\n'
+    '[ -f "$1" ] && [ ! -L "$1" ] || { printf "Refusing non-regular or symlinked source file.\\n" >&2; exit 3; }\n'
+    'dir=/etc/bluetooth\n'
+    'target=/etc/bluetooth/main.conf\n'
+    'if [ ! -d "$dir" ] || [ -L "$dir" ] || [ ! -f "$target" ] || [ -L "$target" ]; then\n'
+    '  printf "Refusing to write through a symlink or missing target.\\n" >&2\n'
+    '  exit 3\n'
+    'fi\n'
+    'tmp="$(/usr/bin/mktemp "$dir/.main.conf.sm-tmp.XXXXXX")"\n'
+    'cleanup() { /usr/bin/rm -f -- "$tmp"; }\n'
+    'trap cleanup EXIT\n'
+    'trap \'cleanup; exit 130\' INT\n'
+    'trap \'cleanup; exit 143\' TERM\n'
+    'trap \'cleanup; exit 129\' HUP\n'
+    '/usr/bin/install -m 0600 -o 0 -g 0 -- "$src" "$tmp"\n'
+    'if ! printf \'%s  %s\\n\' "$hash" "$tmp" | /usr/bin/sha256sum -c --status -; then\n'
+    '  printf "Verification failed: staged file checksum mismatch.\\n" >&2\n'
+    '  exit 4\n'
+    'fi\n'
+    '/usr/bin/chmod 0644 -- "$tmp"\n'
+    '/usr/bin/mv -f -- "$tmp" "$target"\n'
+    'trap - EXIT INT TERM HUP\n'
+    'if [ -x /usr/bin/systemctl ]; then\n'
+    '  /usr/bin/systemctl try-restart bluetooth.service\n'
+    'fi\n'
+)
 
 DNS_TEST_RESOLVERS: tuple[tuple[str, str, str], ...] = (
     ("cloudflare", "Cloudflare", "1.1.1.1"),
@@ -309,12 +409,12 @@ def _terminal_argv(command: list[str]) -> list[str] | None:
 
 
 @contextlib.contextmanager
-def _staged_file(filename: str, content: str, mode: int = 0o644):
+def _staged_file(filename: str, content: str | bytes, mode: int = 0o600):
     """Write ``content`` into an exclusive file inside a private 0700 temp directory."""
     with tempfile.TemporaryDirectory(prefix="sm-tune-") as tmp_dir:
         os.chmod(tmp_dir, 0o700)
         target = Path(tmp_dir) / filename
-        encoded = content.encode("utf-8")
+        encoded = content if isinstance(content, bytes) else content.encode("utf-8")
         fd = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
         closed = False
         try:
@@ -332,58 +432,6 @@ def _staged_file(filename: str, content: str, mode: int = 0o644):
                     pass
             raise
         yield target
-
-
-def _install_verified_root_file(
-    target: Path,
-    content: str,
-    *,
-    create_dir: bool = False,
-) -> tuple[bool, str]:
-    """Atomically install ``content`` to root-owned ``target`` with read-back verification.
-
-    Installs into a sibling ``.<name>.sm-tmp`` path first, reads the root-owned file back with
-    ``O_NOFOLLOW`` and compares byte-for-byte with ``content`` (removing the temp file on mismatch
-    so a staged-file swap race can never reach ``target``), then atomically ``mv``s it into place.
-    """
-    tmp_root = target.parent / f".{target.name}.sm-tmp"
-    if _path_is_symlink(target.parent) or _path_is_symlink(target) or _path_is_symlink(tmp_root):
-        return False, "Refusing to write through a symlink."
-    for check_path in (target, tmp_root):
-        try:
-            st = os.lstat(check_path)
-        except FileNotFoundError:
-            st = None
-        except OSError:
-            return False, f"Could not inspect {check_path}."
-        if st is not None and not stat.S_ISREG(st.st_mode):
-            return False, "Refusing to overwrite non-regular file."
-
-    expected_bytes = content.encode("utf-8")
-    if len(expected_bytes) > MAX_CONFIG_BYTES:
-        return False, "Configuration file is too large."
-
-    with _staged_file(target.name, content, mode=0o644) as staged_path:
-        install_argv = ["pkexec", "/usr/bin/install"]
-        if create_dir:
-            install_argv.append("-D")
-        install_argv.extend(["-m", "0644", "-o", "0", "-g", "0", "--", str(staged_path), str(tmp_root)])
-        install_res = core.run(install_argv, timeout=POLKIT_TIMEOUT)
-        if not install_res.ok:
-            return False, _err_text(install_res, pkexec=True)
-
-    actual = _read_bytes_file(tmp_root, MAX_CONFIG_BYTES, nofollow=True)
-    if actual is None or actual != expected_bytes:
-        core.run(["pkexec", "/usr/bin/rm", "-f", "--", str(tmp_root)], timeout=POLKIT_TIMEOUT)
-        return False, "Verification failed: installed file did not match expected content."
-
-    mv_res = core.run(
-        ["pkexec", "/usr/bin/mv", "-f", "--", str(tmp_root), str(target)],
-        timeout=POLKIT_TIMEOUT,
-    )
-    if not mv_res.ok:
-        return False, _err_text(mv_res, pkexec=True)
-    return True, ""
 
 
 def _parse_nmcli_terse(line: str) -> list[str]:
@@ -876,7 +924,7 @@ def read_network_tune() -> dict:
             "dropin": str(SYSCTL_BBR_FILE),
         },
         "wifi": wifi,
-        "pkexec": shutil.which("pkexec") is not None,
+        "pkexec": _resolve_usr_bin("pkexec") is not None,
     }
 
 
@@ -1035,69 +1083,42 @@ def _other_sysctl_sets_bbr() -> bool:
 
 
 def set_bbr(enable: bool) -> tuple[bool, str]:
-    """Enable or disable TCP BBR via verified atomic sysctl drop-in + runtime ``sysctl -w``.
+    """Enable or disable TCP BBR in a single ``pkexec`` call (no staged file).
 
-    When enabling on a system whose other sysctl.d files (e.g. Omarchy's ``99-omarchy-sysctl.conf``)
-    already enable BBR + fq, removes our drop-in instead of keeping a duplicate pin. Runtime values
-    are always applied with fixed allowlisted ``sysctl -w`` arguments (never ``sysctl -p`` on a file).
-    Returns ``(True, "reboot")`` if the persistent file changed but the runtime apply was cancelled.
+    A constant root script writes (or removes) ``/etc/sysctl.d/99-zz-settings-manager-network.conf``
+    atomically with mode ``0644`` and applies ``sysctl -w`` using allowlisted positional arguments.
+    When the desired state matches what other sysctl.d files (e.g. Omarchy's
+    ``99-omarchy-sysctl.conf``) already configure, our drop-in is removed instead of pinning a copy.
     """
     if not isinstance(enable, bool):
         return False, "Invalid BBR setting."
-    if not shutil.which("pkexec"):
+    pkexec_path = _resolve_usr_bin("pkexec")
+    if pkexec_path is None:
         return False, "pkexec is missing."
     if _path_is_symlink(SYSCTL_DIR) or _path_is_symlink(SYSCTL_BBR_FILE):
         return False, "Refusing to write through a symlink."
+    try:
+        st = os.lstat(SYSCTL_BBR_FILE)
+    except FileNotFoundError:
+        st = None
+    except OSError:
+        return False, "Could not inspect target sysctl drop-in."
+    if st is not None and not stat.S_ISREG(st.st_mode):
+        return False, "Refusing to modify non-regular file."
 
     qdisc = "fq" if enable else "fq_codel"
     cc = "bbr" if enable else "cubic"
-    if qdisc not in _BBR_QDISCS or cc not in _BBR_CONGESTION:
+    if qdisc not in _BBR_QDISCS or cc not in _BBR_CONGESTION or (qdisc, cc) not in _BBR_VALID_PAIRS:
         return False, "Invalid BBR setting."
 
-    persisted_changed = False
-    if enable and _other_sysctl_sets_bbr():
-        try:
-            st = os.lstat(SYSCTL_BBR_FILE)
-        except FileNotFoundError:
-            st = None
-        except OSError:
-            return False, "Could not inspect target sysctl drop-in."
-        if st is not None:
-            if not stat.S_ISREG(st.st_mode):
-                return False, "Refusing to remove non-regular file."
-            rm_res = core.run(
-                ["pkexec", "/usr/bin/rm", "-f", "--", str(SYSCTL_BBR_FILE)],
-                timeout=POLKIT_TIMEOUT,
-            )
-            if not rm_res.ok:
-                return False, _err_text(rm_res, pkexec=True)
-            persisted_changed = True
-    else:
-        content = (
-            "# Managed by Settings Manager (Optimize -> Network)\n"
-            f"net.core.default_qdisc = {qdisc}\n"
-            f"net.ipv4.tcp_congestion_control = {cc}\n"
-        )
-        ok, err = _install_verified_root_file(SYSCTL_BBR_FILE, content, create_dir=True)
-        if not ok:
-            return False, err
-        persisted_changed = True
-
-    apply_res = core.run(
-        [
-            "pkexec",
-            "/usr/bin/sysctl",
-            "-q",
-            "-w",
-            f"net.core.default_qdisc={qdisc}",
-            f"net.ipv4.tcp_congestion_control={cc}",
-        ],
+    remove_dropin = enable == _other_sysctl_sets_bbr()
+    script = _BBR_REMOVE_SCRIPT if remove_dropin else _BBR_WRITE_SCRIPT
+    res = core.run(
+        [pkexec_path, "/bin/sh", "-c", script, "sh", qdisc, cc],
         timeout=POLKIT_TIMEOUT,
     )
-    if not apply_res.ok:
-        if persisted_changed:
-            return True, "reboot"
-        return False, _err_text(apply_res, pkexec=True)
+    if not res.ok:
+        return False, _err_text(res, pkexec=True)
     return True, ""
 
 
@@ -1234,13 +1255,20 @@ def read_bluetooth_tune() -> dict:
         "ok": True,
         "available": available,
         "file": str(BT_MAIN_CONF),
-        "pkexec": shutil.which("pkexec") is not None,
+        "pkexec": _resolve_usr_bin("pkexec") is not None,
         "options": options,
     }
 
 
 def set_bluetooth_option(key: str, value) -> tuple[bool, str]:
-    """Write one validated BlueZ main.conf option via pkexec, then restart bluetooth via polkit."""
+    """Write one validated BlueZ main.conf option and restart bluetooth in one ``pkexec`` call.
+
+    Stages the updated content in a ``0700`` temp directory and invokes a constant root script
+    with ``<staged>`` and its SHA-256 hex digest as positional arguments. As root, the script
+    rejects non-regular or symlinked sources, copies with ``install -m 0600`` to a temp file in
+    ``/etc/bluetooth``, verifies the digest via ``sha256sum`` (removing the temp file on mismatch),
+    then ``chmod 0644``, atomically ``mv``s into place, and runs ``systemctl try-restart``.
+    """
     if not isinstance(key, str) or key not in BT_OPTIONS:
         return False, "Unknown Bluetooth option."
     section, kind, _default = BT_OPTIONS[key]
@@ -1264,21 +1292,23 @@ def set_bluetooth_option(key: str, value) -> tuple[bool, str]:
         current = raw.decode("utf-8")
     except UnicodeDecodeError:
         return False, f"{BT_MAIN_CONF} is not valid UTF-8; refusing to overwrite."
-    if not shutil.which("pkexec"):
+    pkexec_path = _resolve_usr_bin("pkexec")
+    if pkexec_path is None:
         return False, "pkexec is missing."
 
     updated = update_bluetooth_conf(current, section, key, text_val)
-    ok, err = _install_verified_root_file(BT_MAIN_CONF, updated, create_dir=False)
-    if not ok:
-        return False, err
+    encoded = updated.encode("utf-8")
+    if len(encoded) > MAX_CONFIG_BYTES:
+        return False, "Configuration file is too large."
+    digest = hashlib.sha256(encoded).hexdigest()
 
-    if shutil.which("systemctl"):
-        restart_res = core.run(
-            ["systemctl", "try-restart", "bluetooth.service"],
+    with _staged_file(BT_MAIN_CONF.name, encoded, mode=0o600) as staged_path:
+        res = core.run(
+            [pkexec_path, "/bin/sh", "-c", _BT_INSTALL_SCRIPT, "sh", str(staged_path), digest],
             timeout=POLKIT_TIMEOUT,
         )
-        if not restart_res.ok:
-            return False, _err_text(restart_res, pkexec=True)
+    if not res.ok:
+        return False, _err_text(res, pkexec=True)
     return True, ""
 
 
