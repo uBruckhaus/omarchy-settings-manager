@@ -108,3 +108,35 @@ crash toggle, the backends' CLIs). Only file written: `~/.config/maprisma-ai/set
    `notifications|ai|voice` (and the other new pages) yet.
 3. Translation parts may overlap with other tasks for common words (`Status`, `Install`, `Microphone`,
    `History`…); harmless (later part wins), dedupe if wanted.
+
+## Round 1 fixes (Antigravity review, docs/reviews/c-services.md)
+
+I checked every claim against the code and the system (read only); all eight are correct.
+
+1. **Medium, setters started a stopped Superwhisper**: correct. `sw_set_language`,
+   `sw_select_microphone` and `sw_select_mode` ran `superwhisper … show` before the service check.
+   Each setter now asks systemd first (`_sw_running()`). The test covers all five setters with the
+   service stopped and asserts that no `superwhisper` command runs at all.
+2. **Medium, snapshot had helpers without `ask`**: correct. In `helpers_shipped.g.dart`, gemini,
+   opencode and goose have `"ask": null`. They are removed, so the snapshot is the 10 helpers that have
+   an `ask`, in Maprisma's order (pinned by a test). Live, OpenCode is no longer offered.
+3. **Medium, unplugged microphones**: correct. Superwhisper's own panel (`status.py` `microphones()`)
+   skips `availability` "disconnected" / "not available". `sw_audio()` now does the same, so
+   `sw_select_microphone()` refuses them. The saved `audioInputDeviceId` is now read, so a saved
+   microphone that is unplugged still shows. Tests cover both.
+4. **Medium, combos hid an unlisted saved value**: correct. A new `services_core.with_current()` adds
+   the saved value as an extra entry when it is not offered, and selects it. Labels: "{0} (not offered
+   now)" for language, "{0} (not connected)" for microphone. Every offered value, Automatic too, then
+   stays a real change. The AI page uses the same helper. Unit-tested; translations added.
+5. **Low, group titles not escaped**: all `Adw.PreferencesGroup` titles now go through `escape()`.
+6. **Low, overlapping DND toggles**: every switch on these pages is insensitive while its change is in
+   flight. Do not disturb makes it usable again (or reverts it) when the answer comes. The others reload
+   the page.
+7. **Low, reader followed a linked AI folder**: `read_shared_ai()` now opens `maprisma-ai/` with
+   `O_DIRECTORY | O_NOFOLLOW` and reads `settings.json` relative to it, as the writer does. A linked
+   folder shows as broken (tested).
+8. **Low, `~` shortening**: `services_core.short_home()` now uses `Path.relative_to` (whole folder
+   names only), with tests for `/home/u-alt` and `/tmp/home/u`.
+
+Tests: `tests/test_services_core.py` has 45 tests; the translations test passes; the full suite passed
+once (149 tests). Screenshots retaken; there were no layout changes.
