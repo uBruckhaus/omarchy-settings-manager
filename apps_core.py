@@ -167,7 +167,8 @@ def exec_argv(exec_line: str) -> list[str]:
     if parts and os.path.basename(parts[0]) == "env":
         parts = parts[1:]
         while parts and (parts[0].startswith("-") or ("=" in parts[0] and not parts[0].startswith("/"))):
-            parts = parts[1:]
+            takes_value = parts[0] in ("-u", "--unset", "-C", "--chdir")
+            parts = parts[2:] if takes_value else parts[1:]
     return parts
 
 
