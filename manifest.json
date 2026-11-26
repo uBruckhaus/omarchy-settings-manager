@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "ubruckhaus.settings-manager",
   "name": "Settings Manager",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "Uwe Bruckhaus",
   "license": "MIT",
   "description": "Manage Omarchy shell plugins and zero-privilege Hyprland/Omarchy desktop settings in one window: Plugins, Bar layout with drag and drop, Updates, Network, Bluetooth, Appearance, Displays, Sound, Power, Input devices, Applications, About, and Settings. Features a reorderable sidebar with custom separators and responsive layout; never asks for administrator rights.",

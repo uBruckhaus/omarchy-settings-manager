@@ -21,7 +21,10 @@ from pathlib import Path
 import plugins_core as core
 
 # Configurable paths (overridable in tests)
-HYPRIDLE_CONF = Path.home() / ".config/hypr/hypridle.conf"
+SHELL_JSON = Path.home() / ".config/omarchy/shell.json"
+STAY_AWAKE_FILE = Path.home() / ".local/state/omarchy/indicators/stay-awake"
+IDLE_DEFAULT_SCREENSAVER = 150   # the shell's defaults (omarchy.idle Service.qml)
+IDLE_DEFAULT_LOCK = 300
 AUTOSTART_DIR = Path.home() / ".config/autostart"
 OMARCHY_VERSION_FILE = Path.home() / ".local/share/omarchy/version"
 DMI_DIR = Path("/sys/devices/virtual/dmi/id")
@@ -50,6 +53,7 @@ POWER_PROFILES = ("power-saver", "balanced", "performance")
 MAX_IDLE_SECONDS = 86400
 MAX_DESKTOP_BYTES = 64 * 1024
 MAX_CONFIG_BYTES = 256 * 1024
+MAX_SHELL_JSON_BYTES = 1024 * 1024
 MAX_PACTL_NAME = 256
 
 DEFAULT_CATEGORIES: list[tuple[str, str, tuple[str, ...]]] = [
@@ -73,7 +77,6 @@ _BT_DEVICE_RE = re.compile(r"^Device\s+([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})(?:
 _BT_KV_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9 /_-]*):\s*(.*)$")
 _BT_BATTERY_RE = re.compile(r"\((\d+)\)")
 _PROFILE_LINE_RE = re.compile(r"^\s*(\*?)\s*([a-z][a-z0-9-]*):\s*$")
-_TIMEOUT_LINE_RE = re.compile(r"^(\s*timeout\s*=\s*)(\d+)(.*)$")
 
 
 # --- validation & safe I/O -----------------------------------------------------------------------
@@ -615,93 +618,48 @@ def bt_pair(mac: str) -> tuple[bool, str]:
     return True, ""
 
 
-# --- 3. Power (powerprofilesctl + ~/.config/hypr/hypridle.conf) ----------------------------------
+# --- 3. Power (powerprofilesctl + the Omarchy shell's idle timers in shell.json) ---------------
+#
+# Since Omarchy 4.5 the shell's own idle service (omarchy.idle) replaces hypridle. It reads two
+# timers in seconds from the "idle" object of ~/.config/omarchy/shell.json: "screensaver" and
+# "lock"; 0 turns that step off, a missing or invalid value means the shell's default. The shell
+# reloads shell.json on save. "Stay awake" is a state file switched by `omarchy toggle idle`.
 
-def _strip_hypr_comment(line: str) -> str:
-    idx = line.find("#")
-    return line[:idx] if idx >= 0 else line
+def _idle_seconds(value, fallback: int) -> int:
+    """The shell's IdleModel.secondsFromConfig: a finite number >= 0 (floored), else the default."""
+    if isinstance(value, bool):
+        value = int(value)
+    if isinstance(value, str):
+        try:
+            value = float(value.strip()) if value.strip() else 0.0
+        except ValueError:
+            return fallback
+    if value is None:
+        value = 0
+    if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        return fallback
+    return int(math.floor(value))
 
 
-def _classify_listener(on_timeout: str) -> str | None:
-    cmd = on_timeout.lower()
-    if "dpms" in cmd:
-        return "screen_off"
-    if "suspend" in cmd:
-        return "suspend"
-    if "lock-session" in cmd or "omarchy-lock-screen" in cmd or ("hyprlock" in cmd and "screensaver" not in cmd):
-        return "lock"
-    return None
+def _read_shell_json() -> tuple[str | None, dict | None]:
+    """(raw text, parsed object) of shell.json; (None, None) when it is missing, a link or not an
+    object; (text, None) when it is not valid JSON."""
+    text = _read_text_file(SHELL_JSON, max_bytes=MAX_SHELL_JSON_BYTES, nofollow=True)
+    if text is None:
+        return None, None
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return text, None
+    return text, data if isinstance(data, dict) else None
 
 
-def _parse_hypridle_listeners(text: str) -> list[dict]:
-    """Parse top-level `listener { ... }` blocks, recording their role, timeout, and line index."""
-    lines = text.splitlines()
-    listeners: list[dict] = []
-    in_listener = False
-    awaiting_brace = False
-    depth = 0
-    block_timeout: int | None = None
-    timeout_line_idx: int | None = None
-    on_timeout_cmds: list[str] = []
-
-    for idx, raw in enumerate(lines):
-        clean = _strip_hypr_comment(raw).strip()
-        if not in_listener:
-            if awaiting_brace:
-                if clean.startswith("{"):
-                    in_listener = True
-                    awaiting_brace = False
-                    depth = clean.count("{") - clean.count("}")
-                    block_timeout = None
-                    timeout_line_idx = None
-                    on_timeout_cmds = []
-                    if depth <= 0:
-                        in_listener = False
-                    continue
-                if clean:
-                    awaiting_brace = False
-            if re.match(r"^listener\s*\{", clean):
-                in_listener = True
-                depth = clean.count("{") - clean.count("}")
-                block_timeout = None
-                timeout_line_idx = None
-                on_timeout_cmds = []
-                if depth <= 0:
-                    in_listener = False
-                continue
-            if re.match(r"^listener\s*$", clean):
-                awaiting_brace = True
-                continue
-        else:
-            depth += clean.count("{") - clean.count("}")
-            if "=" in clean:
-                k, v = clean.split("=", 1)
-                key = k.strip().lower()
-                val = v.strip()
-                if key == "timeout" and val.isdigit():
-                    block_timeout = int(val)
-                    timeout_line_idx = idx
-                elif key == "on-timeout":
-                    on_timeout_cmds.append(val)
-            if depth <= 0:
-                role = None
-                for cmd in on_timeout_cmds:
-                    role = _classify_listener(cmd)
-                    if role is not None:
-                        break
-                listeners.append({
-                    "role": role,
-                    "timeout": block_timeout,
-                    "timeout_line": timeout_line_idx,
-                })
-                in_listener = False
-                depth = 0
-
-    return listeners
+def stay_awake_enabled() -> bool:
+    return STAY_AWAKE_FILE.exists()
 
 
 def read_power() -> dict:
-    """Read power profiles (`powerprofilesctl`) and Hypridle timeouts (`HYPRIDLE_CONF`)."""
+    """Read power profiles (`powerprofilesctl`), the shell's idle timers (`SHELL_JSON`) and Stay awake."""
     profiles: list[str] = []
     active_profile = ""
 
@@ -727,14 +685,14 @@ def read_power() -> dict:
 
     profiles_available = bool(profiles) or bool(active_profile)
 
-    idle: dict[str, int | None] = {"lock": None, "screen_off": None, "suspend": None}
-    text = _read_text_file(HYPRIDLE_CONF, max_bytes=MAX_CONFIG_BYTES, nofollow=True)
-    idle_available = text is not None
-    if text is not None:
-        for block in _parse_hypridle_listeners(text):
-            role = block["role"]
-            if role in idle and idle[role] is None and block["timeout"] is not None:
-                idle[role] = block["timeout"]
+    idle = {"screensaver": IDLE_DEFAULT_SCREENSAVER, "lock": IDLE_DEFAULT_LOCK}
+    _text, config = _read_shell_json()
+    idle_available = config is not None
+    if config is not None:
+        section = config.get("idle")
+        if isinstance(section, dict):
+            idle["screensaver"] = _idle_seconds(section.get("screensaver", IDLE_DEFAULT_SCREENSAVER), IDLE_DEFAULT_SCREENSAVER)
+            idle["lock"] = _idle_seconds(section.get("lock", IDLE_DEFAULT_LOCK), IDLE_DEFAULT_LOCK)
 
     return {
         "ok": profiles_available or idle_available,
@@ -742,8 +700,9 @@ def read_power() -> dict:
         "active_profile": active_profile,
         "profiles": profiles,
         "idle_available": idle_available,
-        "idle_path": str(HYPRIDLE_CONF),
+        "idle_path": str(SHELL_JSON),
         "idle": idle,
+        "stay_awake": stay_awake_enabled(),
     }
 
 
@@ -756,60 +715,53 @@ def set_power_profile(profile: str) -> tuple[bool, str]:
 
 
 def _valid_timeout_arg(val) -> bool:
-    if val is None:
-        return True
     return isinstance(val, int) and not isinstance(val, bool) and 0 <= val <= MAX_IDLE_SECONDS
 
 
-def save_idle_timeouts(
-    lock_s: int | None,
-    screen_off_s: int | None,
-    suspend_s: int | None,
-) -> tuple[bool, str]:
-    """Update matching listener `timeout = ...` lines in `HYPRIDLE_CONF` atomically."""
-    updates = {"lock": lock_s, "screen_off": screen_off_s, "suspend": suspend_s}
-    for key, val in updates.items():
+def save_idle_timeouts(screensaver_s: int, lock_s: int) -> tuple[bool, str]:
+    """Set `idle.screensaver` and `idle.lock` (seconds, 0 = off) in shell.json, keeping every other
+    key and its order. Refuses links and files that changed while we were writing."""
+    for key, val in (("screensaver", screensaver_s), ("lock", lock_s)):
         if not _valid_timeout_arg(val):
             return False, f"invalid {key} timeout (must be 0..{MAX_IDLE_SECONDS})"
+    if SHELL_JSON.parent.is_symlink() or SHELL_JSON.is_symlink():
+        return False, "refusing symlink shell.json"
 
-    if HYPRIDLE_CONF.parent.is_symlink() or HYPRIDLE_CONF.is_symlink():
-        return False, "refusing symlink hypridle.conf"
-
-    text = _read_text_file(HYPRIDLE_CONF, max_bytes=MAX_CONFIG_BYTES, nofollow=True)
+    text, config = _read_shell_json()
     if text is None:
-        return False, "hypridle.conf is not readable"
+        return False, "shell.json is not readable"
+    if config is None:
+        return False, "shell.json is not valid JSON; fix it first"
 
-    listeners = _parse_hypridle_listeners(text)
-    lines = text.splitlines(keepends=True)
-    seen_roles: set[str] = set()
-
-    for block in listeners:
-        role = block["role"]
-        line_idx = block["timeout_line"]
-        if role not in updates or role in seen_roles or line_idx is None:
-            continue
-        seen_roles.add(role)
-        new_val = updates[role]
-        if new_val is None:
-            continue
-        raw_line = lines[line_idx]
-        line_ending = ""
-        if raw_line.endswith("\r\n"):
-            body, line_ending = raw_line[:-2], "\r\n"
-        elif raw_line.endswith("\n"):
-            body, line_ending = raw_line[:-1], "\n"
-        else:
-            body = raw_line
-        replaced = _TIMEOUT_LINE_RE.sub(lambda m: f"{m.group(1)}{new_val}{m.group(3)}", body, count=1)
-        lines[line_idx] = replaced + line_ending
+    section = config.get("idle")
+    if not isinstance(section, dict):
+        section = {}
+    section["screensaver"] = screensaver_s
+    section["lock"] = lock_s
+    config["idle"] = section
+    updated = json.dumps(config, indent=2, ensure_ascii=False) + "\n"
+    if updated == text:
+        return True, ""
 
     try:
-        _atomic_write_text(HYPRIDLE_CONF, "".join(lines), mode=0o600)
+        mode = stat.S_IMODE(os.lstat(SHELL_JSON).st_mode) or 0o644
     except OSError as exc:
         return False, str(exc)
-
-    core.run(["omarchy", "restart", "hypridle"], timeout=10)
+    if _read_text_file(SHELL_JSON, max_bytes=MAX_SHELL_JSON_BYTES, nofollow=True) != text:
+        return False, "shell.json changed meanwhile; try again"
+    try:
+        _atomic_write_text(SHELL_JSON, updated, mode=mode)
+    except OSError as exc:
+        return False, str(exc)
     return True, ""
+
+
+def set_stay_awake(enabled: bool) -> tuple[bool, str]:
+    """Switch Omarchy's Stay awake (idle off) via `omarchy toggle idle stay-awake|allow-idle`."""
+    if not isinstance(enabled, bool):
+        return False, "invalid value"
+    res = core.run(["omarchy", "toggle", "idle", "stay-awake" if enabled else "allow-idle"], timeout=10)
+    return (True, "") if res.ok else (False, _err_text(res))
 
 
 # --- 4. Applications (xdg-mime + ~/.config/autostart) --------------------------------------------

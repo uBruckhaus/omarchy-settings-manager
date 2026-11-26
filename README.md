@@ -4,7 +4,7 @@ Manage your installed Omarchy shell plugins and Hyprland/Omarchy desktop setting
 laid out like a settings app (a reorderable sidebar of pages left, the page right; modelled on
 Maprisma Settings).
 
-Version 1.0.0 · plugin id `ubruckhaus.settings-manager` · MIT
+Version 1.0.1 · plugin id `ubruckhaus.settings-manager` · MIT
 
 ## Install
 
@@ -59,8 +59,9 @@ a row to add or remove custom separators or restore the default order. On narrow
   and VRR via `hyprctl` with opt-in persistence.
 - **Sound**: PipeWire/PulseAudio output and input devices, volumes, mute switches and per-app streams
   via `pactl`.
-- **Power**: power profiles (`powerprofilesctl`), battery status and `hypridle` screen/lock/suspend
-  timeouts.
+- **Power**: power profiles (`powerprofilesctl`), the Omarchy shell's screensaver and lock timers
+  (`idle.screensaver` / `idle.lock` in `~/.config/omarchy/shell.json`, 0 = off) and Stay awake
+  (`omarchy toggle idle`).
 - **Input devices**: keyboard layout, Caps Lock behaviour, repeat rate/delay, mouse and touchpad
   sensitivity, natural scroll and tap-to-click for Hyprland.
 - **Applications**: default applications (`xdg-mime`) for web, files, mail, media and text, plus
@@ -106,7 +107,8 @@ user-level tools, session IPC or files inside your own home directory:
   (`-- omarchy-settings-manager`) to load it via `pcall(dofile, ...)`.
 - **Desktop & user tools**: Sound uses `pactl`, Bluetooth uses `bluetoothctl`, Network uses `nmcli`
   or `iwctl` (passing Wi-Fi secrets via a private `0600` temp file or stdin, never argv), Power uses
-  `powerprofilesctl` and `~/.config/hypr/hypridle.conf`, and Applications uses `xdg-mime` and
+  `powerprofilesctl`, the `idle` object of `~/.config/omarchy/shell.json` (only that object is
+  changed; links and unreadable JSON are refused) and `omarchy toggle idle`, and Applications uses `xdg-mime` and
   `~/.config/autostart`.
 
 The update check runs `git fetch origin HEAD` in each plugin checkout (as `omarchy plugin update` does)

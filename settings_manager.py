@@ -51,7 +51,7 @@ from ui_helpers import (  # noqa: E402, F401
 )
 
 APP_ID = "org.omarchy.settingsmanager"
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 CONFIG_DIR = Path.home() / ".config/omarchy/settings-manager"
 SETTINGS_FILE = CONFIG_DIR / "settings.json"
 i18n.SETTINGS_FILE = SETTINGS_FILE

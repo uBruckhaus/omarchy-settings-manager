@@ -97,10 +97,16 @@ def _note_group(title: str, row_title: str, row_subtitle: str = "") -> Adw.Prefe
     return group
 
 
-def _secs_to_mins(seconds: int | None) -> int:
-    if seconds is None or seconds <= 0:
-        return 0
-    return max(1, min(1440, int(round(seconds / 60.0))))
+def _describe_idle_seconds(seconds: int) -> str:
+    """"Off" for 0, else the time in minutes and seconds (e.g. "2 min 30 s")."""
+    if seconds <= 0:
+        return _("Off")
+    mins, secs = divmod(seconds, 60)
+    if mins and secs:
+        return _("{0} min {1} s").format(mins, secs)
+    if mins:
+        return _("{0} min").format(mins)
+    return _("{0} s").format(secs)
 
 
 class SystemPages:
@@ -1099,7 +1105,7 @@ class SystemPages:
 
     def _build_power_page(self, stack: Gtk.Stack) -> None:
         header = make_header_row(
-            _("Choose a power mode and configure screen lock, display sleep, and suspend timers."),
+            _("Choose a power mode and set when the screensaver starts and the screen locks."),
             lambda: self.refresh("power"),
         )
         self._add_page(stack, "power", header)
@@ -1184,8 +1190,8 @@ class SystemPages:
         return group
 
     def _build_idle_timers_group(self, data: dict) -> Adw.PreferencesGroup:
-        group = Adw.PreferencesGroup(title=_("Idle & screen timers"))
-        idle_path = str(data.get("idle_path") or "~/.config/hypr/hypridle.conf")
+        group = Adw.PreferencesGroup(title=escape(_("Idle & screen timers")))
+        idle_path = str(data.get("idle_path") or "~/.config/omarchy/shell.json")
         if not data.get("idle_available"):
             row = Adw.ActionRow(
                 title=_("Idle configuration not found"),
@@ -1198,58 +1204,70 @@ class SystemPages:
         group.set_description(escape(idle_path))
         idle = data.get("idle") if isinstance(data.get("idle"), dict) else {}
 
-        def _make_spin(title: str, raw_seconds: int | None) -> Adw.SpinRow:
-            configured = raw_seconds is not None
+        awake_row = Adw.SwitchRow(
+            title=_("Stay awake"),
+            subtitle=_("No screensaver and no lock while this is on, like the idle toggle in the bar."),
+            active=bool(data.get("stay_awake")),
+        )
+        awake_busy = [False]
+
+        def _on_awake(row: Adw.SwitchRow, _pspec) -> None:
+            if awake_busy[0]:
+                return
+            want = row.get_active()
+
+            def _after(res):
+                ok, err = _unpack_result(res)
+                if not ok:
+                    self.app.toast(err or _("Could not switch Stay awake."))
+                    awake_busy[0] = True
+                    row.set_active(not want)
+                    awake_busy[0] = False
+
+            run_async(self.app, lambda: system_core.set_stay_awake(want), _after)
+
+        awake_row.connect("notify::active", _on_awake)
+        group.add(awake_row)
+
+        def _make_spin(title: str, seconds) -> Adw.SpinRow:
+            value = seconds if isinstance(seconds, int) and not isinstance(seconds, bool) else 0
             adj = Gtk.Adjustment(
-                value=_secs_to_mins(raw_seconds),
+                value=max(0, min(value, system_core.MAX_IDLE_SECONDS)),
                 lower=0,
-                upper=1440,
-                step_increment=1,
-                page_increment=5,
+                upper=system_core.MAX_IDLE_SECONDS,
+                step_increment=30,
+                page_increment=60,
             )
-            row = Adw.SpinRow(
-                title=title,
-                subtitle=_("0 leaves this timer unchanged") if configured else _("Not configured in hypridle.conf"),
-                adjustment=adj,
-                digits=0,
-                numeric=True,
-                sensitive=configured,
-            )
+            row = Adw.SpinRow(title=title, adjustment=adj, digits=0, numeric=True)
+
+            def _describe(*_args) -> None:
+                row.set_subtitle(_describe_idle_seconds(int(round(row.get_value()))))
+
+            row.connect("notify::value", _describe)
+            _describe()
             guard_text_fields(row, self.app)
             return row
 
-        lock_row = _make_spin(_("Lock screen after (minutes)"), idle.get("lock"))
-        screen_row = _make_spin(_("Turn off screen after (minutes)"), idle.get("screen_off"))
-        suspend_row = _make_spin(_("Suspend after (minutes)"), idle.get("suspend"))
-
+        screensaver_row = _make_spin(_("Screensaver after (seconds)"), idle.get("screensaver"))
+        lock_row = _make_spin(_("Lock screen after (seconds)"), idle.get("lock"))
+        group.add(screensaver_row)
         group.add(lock_row)
-        group.add(screen_row)
-        group.add(suspend_row)
 
-        has_any = any(idle.get(k) is not None for k in ("lock", "screen_off", "suspend"))
         apply_row = Adw.ActionRow(
             title=_("Save idle timers"),
-            subtitle=_("Updates hypridle.conf and restarts hypridle."),
+            subtitle=_("Writes both timers to shell.json; the shell uses them right away."),
         )
         apply_btn = Gtk.Button(
             label=_("Apply"),
             css_classes=["suggested-action"],
             valign=Gtk.Align.CENTER,
-            sensitive=has_any,
         )
         apply_row.add_suffix(apply_btn)
         group.add(apply_row)
 
         def _on_apply(*_args) -> None:
-            def _val_seconds(spin: Adw.SpinRow, role: str) -> int | None:
-                if idle.get(role) is None:
-                    return None
-                mins = int(round(spin.get_value()))
-                return mins * 60 if mins > 0 else None
-
-            lock_s = _val_seconds(lock_row, "lock")
-            screen_s = _val_seconds(screen_row, "screen_off")
-            suspend_s = _val_seconds(suspend_row, "suspend")
+            screensaver_s = int(round(screensaver_row.get_value()))
+            lock_s = int(round(lock_row.get_value()))
             apply_btn.set_sensitive(False)
 
             def _after(res):
@@ -1263,7 +1281,7 @@ class SystemPages:
 
             run_async(
                 self.app,
-                lambda: system_core.save_idle_timeouts(lock_s, screen_s, suspend_s),
+                lambda: system_core.save_idle_timeouts(screensaver_s, lock_s),
                 _after,
                 busy_text=_("Saving idle timers…"),
             )

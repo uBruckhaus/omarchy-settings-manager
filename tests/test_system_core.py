@@ -125,30 +125,20 @@ SAMPLE_BT_INFO_2 = """Device AA:11:BB:22:CC:33 (public)
 \tConnected: no
 """
 
-SAMPLE_HYPRIDLE = """# User Hypridle config
-general {
-    lock_cmd = omarchy-lock-screen
-}
-
-listener {
-    timeout = 120 # screensaver
-    on-timeout = pidof hyprlock || omarchy-launch-screensaver
-}
-
-listener {
-    timeout = 300 # 5 min
-    on-timeout = loginctl lock-session
-}
-
-listener {
-    timeout = 330
-    on-timeout = hyprctl dispatch dpms off
-    on-resume = hyprctl dispatch dpms on
-}
-
-listener {
-    timeout = 1800 # 30 min
-    on-timeout = loginctl suspend
+SAMPLE_SHELL_JSON = """{
+  "bar": {
+    "groups": {
+      "home": {
+        "icon": "\U000f02dc",
+        "name": "Home"
+      }
+    }
+  },
+  "idle": {
+    "lock": 600,
+    "screensaver": 120
+  },
+  "theme": "x"
 }
 """
 
@@ -374,10 +364,15 @@ class BluetoothTest(unittest.TestCase):
 # --- 3. Power tests ------------------------------------------------------------------------------
 
 class PowerTest(unittest.TestCase):
-    def test_read_power_profiles_and_hypridle(self):
+    def _patch_paths(self, shell_json: Path, awake: Path):
+        return mock.patch.multiple(sc, SHELL_JSON=shell_json, STAY_AWAKE_FILE=awake)
+
+    def test_read_power_profiles_and_shell_idle(self):
         with tempfile.TemporaryDirectory() as tmp:
-            conf = Path(tmp) / "hypridle.conf"
-            conf.write_text(SAMPLE_HYPRIDLE)
+            conf = Path(tmp) / "shell.json"
+            conf.write_text(SAMPLE_SHELL_JSON)
+            awake = Path(tmp) / "stay-awake"
+            awake.touch()
 
             def fake_run(argv, **_kw):
                 if argv == ["powerprofilesctl", "list"]:
@@ -386,7 +381,7 @@ class PowerTest(unittest.TestCase):
                     return core.Result(0, "balanced\n")
                 return core.Result(1, "")
 
-            with mock.patch.object(sc, "HYPRIDLE_CONF", conf), mock.patch.object(core, "run", side_effect=fake_run):
+            with self._patch_paths(conf, awake), mock.patch.object(core, "run", side_effect=fake_run):
                 data = sc.read_power()
 
         self.assertTrue(data["ok"])
@@ -394,18 +389,39 @@ class PowerTest(unittest.TestCase):
         self.assertEqual(data["active_profile"], "balanced")
         self.assertEqual(data["profiles"], ["performance", "balanced", "power-saver"])
         self.assertTrue(data["idle_available"])
-        self.assertEqual(data["idle"], {"lock": 300, "screen_off": 330, "suspend": 1800})
+        self.assertEqual(data["idle"], {"screensaver": 120, "lock": 600})
+        self.assertTrue(data["stay_awake"])
+
+    def test_read_power_idle_values_follow_shell_rules(self):
+        # Same rules as the shell's IdleModel.secondsFromConfig: missing/invalid -> default, 0 = off.
+        cases = [
+            ({}, {"screensaver": 150, "lock": 300}),
+            ({"idle": {}}, {"screensaver": 150, "lock": 300}),
+            ({"idle": {"screensaver": 0, "lock": 45.9}}, {"screensaver": 0, "lock": 45}),
+            ({"idle": {"screensaver": -5, "lock": "abc"}}, {"screensaver": 150, "lock": 300}),
+            ({"idle": {"screensaver": "90", "lock": None}}, {"screensaver": 90, "lock": 0}),
+            ({"idle": "nope"}, {"screensaver": 150, "lock": 300}),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            conf = Path(tmp) / "shell.json"
+            awake = Path(tmp) / "stay-awake"
+            for config, expected in cases:
+                conf.write_text(json.dumps(config))
+                with self._patch_paths(conf, awake), \
+                        mock.patch.object(core, "run", return_value=core.Result(1, "")):
+                    data = sc.read_power()
+                self.assertEqual(data["idle"], expected, config)
+                self.assertFalse(data["stay_awake"])
 
     def test_read_power_missing_binary_and_conf(self):
         with tempfile.TemporaryDirectory() as tmp:
-            missing = Path(tmp) / "missing.conf"
-            with mock.patch.object(sc, "HYPRIDLE_CONF", missing), \
+            missing = Path(tmp) / "missing.json"
+            with self._patch_paths(missing, Path(tmp) / "awake"), \
                     mock.patch.object(core, "run", return_value=core.Result(None, "", "powerprofilesctl: not found")):
                 data = sc.read_power()
         self.assertFalse(data["ok"])
         self.assertFalse(data["profiles_available"])
         self.assertFalse(data["idle_available"])
-        self.assertEqual(data["idle"], {"lock": None, "screen_off": None, "suspend": None})
 
     def test_set_power_profile_allowlist(self):
         with mock.patch.object(core, "run", return_value=core.Result(0, "")) as run:
@@ -418,55 +434,80 @@ class PowerTest(unittest.TestCase):
                 self.assertFalse(sc.set_power_profile(bad)[0])
             run.assert_not_called()
 
-    def test_save_idle_timeouts_preserves_comments_and_atomic(self):
+    def test_save_idle_timeouts_keeps_other_keys_order_and_mode(self):
         with tempfile.TemporaryDirectory() as tmp:
-            conf = Path(tmp) / "hypridle.conf"
-            conf.write_text(SAMPLE_HYPRIDLE)
-            with mock.patch.object(sc, "HYPRIDLE_CONF", conf), \
-                    mock.patch.object(core, "run", return_value=core.Result(0, "")) as run:
-                ok, err = sc.save_idle_timeouts(600, 900, None)
+            conf = Path(tmp) / "shell.json"
+            conf.write_text(SAMPLE_SHELL_JSON)
+            conf.chmod(0o644)
+            with self._patch_paths(conf, Path(tmp) / "awake"), mock.patch.object(core, "run") as run:
+                ok, err = sc.save_idle_timeouts(0, 900)
+                run.assert_not_called()
             self.assertTrue(ok, err)
             updated = conf.read_text()
-            self.assertIn("# User Hypridle config", updated)
-            self.assertIn("timeout = 120 # screensaver", updated)
-            self.assertIn("timeout = 600 # 5 min", updated)
-            self.assertIn("timeout = 900\n", updated)
-            self.assertIn("timeout = 1800 # 30 min", updated)
-            self.assertEqual(conf.stat().st_mode & 0o777, 0o600)
-            run.assert_called_once_with(["omarchy", "restart", "hypridle"], timeout=10)
+            data = json.loads(updated)
+            self.assertEqual(data["idle"], {"lock": 900, "screensaver": 0})
+            self.assertEqual(list(data), ["bar", "idle", "theme"])
+            self.assertEqual(data["bar"]["groups"]["home"]["icon"], "\U000f02dc")
+            self.assertIn("\U000f02dc", updated)          # written as UTF-8, not \\u escapes
+            self.assertEqual(conf.stat().st_mode & 0o777, 0o644)
+            self.assertEqual(list(Path(tmp).iterdir()), [conf])   # no temp file left
+
+    def test_save_idle_timeouts_adds_missing_idle_section(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conf = Path(tmp) / "shell.json"
+            conf.write_text('{"bar": {}}')
+            with self._patch_paths(conf, Path(tmp) / "awake"):
+                self.assertEqual(sc.save_idle_timeouts(150, 300), (True, ""))
+            self.assertEqual(json.loads(conf.read_text()), {"bar": {}, "idle": {"screensaver": 150, "lock": 300}})
 
     def test_save_idle_timeouts_hostile_inputs_and_symlink_and_fifo(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            victim = root / "victim.conf"
-            victim.write_text(SAMPLE_HYPRIDLE)
-            link = root / "hypridle.conf"
+            awake = root / "awake"
+            victim = root / "victim.json"
+            victim.write_text(SAMPLE_SHELL_JSON)
+            link = root / "shell.json"
             link.symlink_to(victim)
+            with self._patch_paths(link, awake):
+                self.assertFalse(sc.save_idle_timeouts(100, 200)[0])
+            self.assertEqual(victim.read_text(), SAMPLE_SHELL_JSON)
 
-            with mock.patch.object(sc, "HYPRIDLE_CONF", link), mock.patch.object(core, "run") as run:
-                self.assertFalse(sc.save_idle_timeouts(100, 200, 300)[0])
-                run.assert_not_called()
-            self.assertEqual(victim.read_text(), SAMPLE_HYPRIDLE)
+            # Out-of-range and non-int timeouts rejected, file untouched
+            real = root / "real.json"
+            real.write_text(SAMPLE_SHELL_JSON)
+            with self._patch_paths(real, awake):
+                for bad in (-1, 86401, True, "300", 12.5, None):
+                    self.assertFalse(sc.save_idle_timeouts(bad, 300)[0], repr(bad))
+                    self.assertFalse(sc.save_idle_timeouts(150, bad)[0], repr(bad))
+            self.assertEqual(real.read_text(), SAMPLE_SHELL_JSON)
 
-            # Out-of-range and non-int timeouts rejected
-            real = root / "real.conf"
-            real.write_text(SAMPLE_HYPRIDLE)
-            with mock.patch.object(sc, "HYPRIDLE_CONF", real), mock.patch.object(core, "run") as run:
-                for bad in (-1, 86401, True, "300", 12.5):
-                    self.assertFalse(sc.save_idle_timeouts(bad, None, None)[0], repr(bad))
-                    self.assertFalse(sc.save_idle_timeouts(None, bad, None)[0])
-                    self.assertFalse(sc.save_idle_timeouts(None, None, bad)[0])
-                run.assert_not_called()
+            # Broken JSON and a non-object are never overwritten
+            for text in ("{not json", "[1, 2]"):
+                real.write_text(text)
+                with self._patch_paths(real, awake):
+                    self.assertFalse(sc.save_idle_timeouts(150, 300)[0])
+                self.assertEqual(real.read_text(), text)
 
             # FIFO does not block read_power or save_idle_timeouts
-            fifo = root / "fifo.conf"
+            fifo = root / "fifo.json"
             os.mkfifo(fifo)
             start = time.monotonic()
-            with mock.patch.object(sc, "HYPRIDLE_CONF", fifo), \
+            with self._patch_paths(fifo, awake), \
                     mock.patch.object(core, "run", return_value=core.Result(1, "")):
                 self.assertFalse(sc.read_power()["idle_available"])
-                self.assertFalse(sc.save_idle_timeouts(100, None, None)[0])
+                self.assertFalse(sc.save_idle_timeouts(100, 100)[0])
             self.assertLess(time.monotonic() - start, 1.0)
+
+    def test_set_stay_awake_uses_omarchy_toggle(self):
+        with mock.patch.object(core, "run", return_value=core.Result(0, "disabled\n")) as run:
+            self.assertEqual(sc.set_stay_awake(True), (True, ""))
+            run.assert_called_with(["omarchy", "toggle", "idle", "stay-awake"], timeout=10)
+            self.assertEqual(sc.set_stay_awake(False), (True, ""))
+            run.assert_called_with(["omarchy", "toggle", "idle", "allow-idle"], timeout=10)
+        with mock.patch.object(core, "run") as run:
+            for bad in (1, "yes", None):
+                self.assertFalse(sc.set_stay_awake(bad)[0])
+            run.assert_not_called()
 
 
 # --- 4. Applications tests -----------------------------------------------------------------------
