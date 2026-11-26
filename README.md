@@ -59,6 +59,22 @@ a row to add or remove custom separators or restore the default order. On narrow
   and VRR via `hyprctl` with opt-in persistence.
 - **Sound**: PipeWire/PulseAudio output and input devices, volumes, mute switches and per-app streams
   via `pactl`.
+- **Notifications**: Do not disturb of the shell's notification service (`omarchy-shell notifications
+  setDnd`, as `omarchy toggle notification silencing`), a test notification, how many are on screen
+  (Dismiss all, Show recent again), the shell's 24-hour history (read only: Omarchy has no command to
+  clear it), crash notifications on/off and muted programs (`omarchy-toggle-crash-capture`,
+  `omarchy-crash-mute`), reminders (`omarchy-reminder`) and Omarchy's notification keys. Popup
+  position, duration and count are fixed in Omarchy 4.5, so there are no settings for them.
+- **AI**: the AI helper all Maprisma apps use (`helper` and `web_search` in
+  `~/.config/maprisma-ai/settings.json`, written under its `settings.lock` as the Maprisma apps do,
+  every other key kept, a broken file never rewritten), the helpers found on this PC (agent CLIs and
+  pi/Hermes local models, detected from their programs and sign-in files; none is started, no tokens)
+  and Omarchy's default coding agent (read only).
+- **Voice**: Omarchy dictation (`omarchy dictation`, backend in `~/.config/omarchy/defaults/dictation`):
+  status, Start/Stop to try it, Superwhisper and Voxtype with Use/Install and Remove (Omarchy's own
+  installer or remover in a visible terminal, which asks for the admin password there; Remove asks
+  first), Superwhisper's mode, language, tone, microphone and switches through its CLI (only while its
+  service runs), Voxtype's settings read only with its configuration and model setup in a terminal.
 - **Power**: power profiles (`powerprofilesctl`), the Omarchy shell's screensaver and lock timers
   (`idle.screensaver` / `idle.lock` in `~/.config/omarchy/shell.json`, 0 = off) and Stay awake
   (`omarchy toggle idle`).
@@ -110,6 +126,11 @@ user-level tools, session IPC or files inside your own home directory:
   `powerprofilesctl`, the `idle` object of `~/.config/omarchy/shell.json` (only that object is
   changed; links and unreadable JSON are refused) and `omarchy toggle idle`, and Applications uses `xdg-mime` and
   `~/.config/autostart`.
+- **Notifications, AI, Voice**: the shell's `notifications` IPC, `omarchy-toggle-crash-capture`,
+  `omarchy-crash-mute`, `omarchy-reminder`, `omarchy-dictation`, `superwhisper` and `voxtype`; the only
+  file written is `~/.config/maprisma-ai/settings.json` (two keys). The admin password is needed only
+  for installing or removing a dictation backend, and only in the visible terminal Omarchy's own
+  installer opens (`omarchy-launch-floating-terminal-with-presentation omarchy-install-dictation-…`).
 
 The update check runs `git fetch origin HEAD` in each plugin checkout (as `omarchy plugin update` does)
 and counts the new commits; nothing is merged until you press Update.
