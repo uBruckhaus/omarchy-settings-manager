@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import struct
+import zlib
 import sys
 import tempfile
 import unittest
@@ -171,11 +173,12 @@ class ListTests(ThemeTestCase):
         self.assertEqual(by["shouty"]["preview"], str(folder / "Preview.JPG"))
 
     def test_hostile_folder_names_are_skipped(self):
+        (self.user / "gifonly").mkdir()
         for name in ("Upper", ".hidden", "-rf", "has space", "semi;colon", "a\nb", "x" * 90):
             (self.user / name).mkdir()
         (self.user / "plainfile").write_text("not a theme")
         self.make_theme(self.user, "good")
-        self.assertEqual(list(self.themes()), ["good"])
+        self.assertEqual(sorted(self.themes()), ["gifonly", "good"])
 
     def test_symlinked_theme_outside_is_listed_but_not_read(self):
         outside = self.base / "elsewhere/evil"
@@ -212,7 +215,7 @@ class ListTests(ThemeTestCase):
         self.assertIsNone(tc.read_image(secret))
 
     def test_wallpapers_skip_videos_and_dirs_and_are_capped(self):
-        names = tuple(f"{i:03d}.png" for i in range(tc.MAX_WALLPAPERS + 15)) + ("intro.mp4", "notes.txt")
+        names = tuple(f"{i:03d}.png" for i in range(tc.MAX_WALLPAPERS + 15)) + ("intro.mp4", "notes.txt", "a.gif")
         folder = self.make_theme(self.system, "many", backgrounds=names)
         (folder / "backgrounds/intros").mkdir()
         (folder / "backgrounds/sub.png").mkdir()
@@ -290,6 +293,112 @@ class ReadImageTests(ThemeTestCase):
         self.assertEqual(key[2], len(PNG))
         self.assertIsNone(tc.image_key(folder / "missing.png"))
         self.assertIsNone(tc.image_key(folder))
+
+
+def png_chunk(kind: bytes, body: bytes) -> bytes:
+    return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body))
+
+
+def make_png(width=4, height=3, extra=()) -> bytes:
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    raw = b"".join(b"\0" + b"\x10\x20\x30" * width for _ in range(height))
+    return (tc.PNG_SIGNATURE + png_chunk(b"IHDR", ihdr) + b"".join(extra)
+            + png_chunk(b"IDAT", zlib.compress(raw)) + png_chunk(b"IEND", b""))
+
+
+def jpeg_segment(marker: int, body: bytes) -> bytes:
+    return bytes([0xFF, marker]) + struct.pack(">H", len(body) + 2) + body
+
+
+def make_jpeg(width=640, height=480, app1=b"Exif\0\0garbage") -> bytes:
+    sof = b"\x08" + struct.pack(">HH", height, width) + b"\x03" + b"\x01\x22\x00\x02\x11\x01\x03\x11\x01"
+    return (b"\xff\xd8" + jpeg_segment(0xE0, b"JFIF\0\x01\x01\0\0\x01\0\x01\0\0")
+            + (jpeg_segment(0xE1, app1) if app1 is not None else b"") + jpeg_segment(0xC0, sof)
+            + jpeg_segment(0xDA, b"\x03\x01\x00\x02\x11\x03\x11\x00\x3f\x00") + b"\x12\x34" + b"\xff\xd9")
+
+
+def webp_chunk(kind: bytes, body: bytes) -> bytes:
+    return kind + struct.pack("<I", len(body)) + body + (b"\0" if len(body) & 1 else b"")
+
+
+def make_webp(width=100, height=50, flags=0x08, chunks=None) -> bytes:
+    vp8x = bytes([flags, 0, 0, 0]) + (width - 1).to_bytes(3, "little") + (height - 1).to_bytes(3, "little")
+    vp8l = bytes([0x2F]) + ((width - 1) | ((height - 1) << 14)).to_bytes(4, "little") + b"\0" * 4
+    body = b"WEBP" + b"".join(chunks if chunks is not None else
+                               [webp_chunk(b"VP8X", vp8x), webp_chunk(b"VP8L", vp8l), webp_chunk(b"EXIF", b"II*\0bad")])
+    return b"RIFF" + struct.pack("<I", len(body)) + body
+
+
+class SafeImageTests(unittest.TestCase):
+    def test_png_keeps_image_drops_metadata(self):
+        data = make_png(extra=(png_chunk(b"eXIf", b"II*\0junk"), png_chunk(b"tEXt", b"k\0v"),
+                               png_chunk(b"zTXt", b"k\0\0" + zlib.compress(b"x" * 1000)), png_chunk(b"tRNS", b"\0\0")))
+        cleaned, width, height = tc.safe_image(data)
+        self.assertEqual((width, height), (4, 3))
+        self.assertNotIn(b"eXIf", cleaned)
+        self.assertNotIn(b"tEXt", cleaned)
+        self.assertNotIn(b"zTXt", cleaned)
+        self.assertIn(b"tRNS", cleaned)
+        self.assertIn(b"IDAT", cleaned)
+        self.assertTrue(cleaned.endswith(png_chunk(b"IEND", b"")))
+
+    def test_png_hostile(self):
+        good = make_png()
+        self.assertIsNone(tc.safe_image(good[:-6]))                                   # truncated
+        self.assertIsNone(tc.safe_image(make_png(width=20000, height=10)))            # too wide
+        self.assertIsNone(tc.safe_image(make_png(width=9000, height=9000)))           # too many pixels
+        self.assertIsNone(tc.safe_image(make_png(width=0, height=10)))
+        no_ihdr = tc.PNG_SIGNATURE + png_chunk(b"IDAT", b"") + png_chunk(b"IEND", b"")
+        self.assertIsNone(tc.safe_image(no_ihdr))
+        huge_len = good[:8] + struct.pack(">I", 2**31) + good[12:]
+        self.assertIsNone(tc.safe_image(huge_len))
+
+    def test_jpeg_drops_app1_and_reads_sof(self):
+        cleaned, width, height = tc.safe_image(make_jpeg())
+        self.assertEqual((width, height), (640, 480))
+        self.assertNotIn(b"Exif", cleaned)
+        self.assertIn(b"JFIF", cleaned)
+        self.assertTrue(cleaned.endswith(b"\x12\x34\xff\xd9"))
+
+    def test_jpeg_hostile(self):
+        self.assertIsNone(tc.safe_image(make_jpeg(width=17000)))
+        data = make_jpeg()
+        self.assertIsNone(tc.safe_image(data[:30]))                                   # cut in a segment
+        no_sof = b"\xff\xd8" + jpeg_segment(0xDA, b"\0") + b"\xff\xd9"
+        self.assertIsNone(tc.safe_image(no_sof))
+        bad_len = b"\xff\xd8\xff\xe1\x00\x01" + b"\0" * 20
+        self.assertIsNone(tc.safe_image(bad_len))
+        self.assertIsNone(tc.safe_image(b"\xff\xd8\xff\xd9"))
+
+    def test_webp_drops_exif_and_flag(self):
+        cleaned, width, height = tc.safe_image(make_webp())
+        self.assertEqual((width, height), (100, 50))
+        self.assertNotIn(b"EXIF", cleaned)
+        self.assertEqual(cleaned[20] & 0x08, 0)                                        # VP8X flag cleared
+        self.assertEqual(int.from_bytes(cleaned[4:8], "little"), len(cleaned) - 8)
+
+    def test_webp_hostile(self):
+        self.assertIsNone(tc.safe_image(make_webp(flags=0x02)))                        # animated flag
+        anim = make_webp(chunks=[webp_chunk(b"ANIM", b"\0" * 6)])
+        self.assertIsNone(tc.safe_image(anim))
+        self.assertIsNone(tc.safe_image(make_webp(width=16385)))
+        self.assertIsNone(tc.safe_image(make_webp(chunks=[webp_chunk(b"EXIF", b"x")])))  # no frame
+        data = make_webp()
+        self.assertIsNone(tc.safe_image(data[:-4]))                                    # shorter than RIFF says
+
+    def test_other_formats_refused(self):
+        for data in (b"", None, b"GIF89a\x10\x00\x10\x00", b"BM" + b"\0" * 60, b"<svg/>", b"\0" * 100):
+            self.assertIsNone(tc.safe_image(data))
+
+    def test_load_image_reads_and_checks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "themes/x/preview.png"
+            path.parent.mkdir(parents=True)
+            path.write_bytes(make_png(extra=(png_chunk(b"eXIf", b"bad"),)))
+            with mock.patch.object(tc, "SYSTEM_THEMES", Path(tmp) / "themes"):
+                result = tc.load_image(path)
+            self.assertIsNotNone(result)
+            self.assertNotIn(b"eXIf", result[0])
 
 
 class ApplyTests(ThemeTestCase):

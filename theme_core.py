@@ -34,8 +34,10 @@ THEME_MANAGER_ID = "ubruckhaus.theme-manager"
 # one path element, never starting with a dot or a dash.
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_+.-]{0,79}$")
 HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$")
-IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp")
-PREVIEW_NAMES = ("preview.png", "preview.jpg", "preview.jpeg", "preview.webp", "preview.gif", "preview.bmp")
+# Only still images whose header is checked here are decoded (GIF/BMP and animations are not
+# shown: an animation's frames are all decoded, and the header alone can't bound them).
+IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp")
+PREVIEW_NAMES = ("preview.png", "preview.jpg", "preview.jpeg", "preview.webp")
 SWATCH_KEYS = ("background", "foreground", "accent", "red", "green", "yellow", "blue", "magenta", "cyan")
 # Older themes name their colours color0…color15 only.
 _ANSI_FALLBACK = {"red": "color1", "green": "color2", "yellow": "color3", "blue": "color4",
@@ -47,6 +49,9 @@ MAX_WALLPAPERS = 60         # wallpapers listed per theme
 MAX_COLORS_BYTES = 64 * 1024
 MAX_STATE_BYTES = 256 * 1024
 MAX_IMAGE_BYTES = 40 * 1024 * 1024
+MAX_IMAGE_SIDE = 16384
+MAX_IMAGE_PIXELS = 64_000_000     # ~256 MiB RGBA while a loader decodes before it scales (8K fits)
+MAX_IMAGE_WALK = 100_000          # segments/chunks walked in one image
 APPLY_TIMEOUT = 180.0
 
 
@@ -131,6 +136,144 @@ def read_image(path: str | Path, max_bytes: int = MAX_IMAGE_BYTES) -> bytes | No
     if path.suffix.lower() not in IMAGE_EXTS:
         return None
     return read_bytes(path, max_bytes, trusted_roots())
+
+
+# --- image headers ------------------------------------------------------------------------------
+#
+# gdk-pixbuf 2.44 decodes through glycin, which reads EXIF in this process and (2.2.x) aborts the
+# whole process on some camera EXIF; the loaders also allocate the declared canvas before scaling.
+# So the GTK side only decodes bytes that passed `safe_image`: a JPEG, PNG or still WebP whose
+# size is within the caps, walked to the end, with its metadata (EXIF, XMP, ICC, text) removed.
+
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+_PNG_KEEP = {b"IHDR", b"PLTE", b"IDAT", b"IEND", b"tRNS"}
+_JPEG_DROP = {0xE1, 0xE2, 0xED, 0xFE}           # APP1 EXIF/XMP, APP2 ICC, APP13 Photoshop, COM
+_JPEG_SOF = {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}
+_WEBP_DROP = {b"EXIF", b"XMP ", b"ICCP"}
+
+
+def _size_ok(width: int, height: int) -> bool:
+    return 0 < width <= MAX_IMAGE_SIDE and 0 < height <= MAX_IMAGE_SIDE and width * height <= MAX_IMAGE_PIXELS
+
+
+def _clean_png(data: bytes) -> tuple[bytes, int, int]:
+    out, pos, size, steps = [PNG_SIGNATURE], 8, None, 0
+    while True:
+        steps += 1
+        if steps > MAX_IMAGE_WALK or pos + 12 > len(data):
+            raise ValueError("PNG ends early")
+        length = int.from_bytes(data[pos:pos + 4], "big")
+        kind = data[pos + 4:pos + 8]
+        end = pos + 12 + length
+        if end > len(data):
+            raise ValueError("PNG chunk runs past the end")
+        if steps == 1:
+            if kind != b"IHDR" or length < 8:
+                raise ValueError("PNG without IHDR")
+            size = (int.from_bytes(data[pos + 8:pos + 12], "big"), int.from_bytes(data[pos + 12:pos + 16], "big"))
+        if kind in _PNG_KEEP:
+            out.append(data[pos:end])
+        pos = end
+        if kind == b"IEND":
+            return b"".join(out), size[0], size[1]
+
+
+def _clean_jpeg(data: bytes) -> tuple[bytes, int, int]:
+    out, pos, size, steps = [data[:2]], 2, None, 0
+    while True:
+        steps += 1
+        if steps > MAX_IMAGE_WALK or pos + 2 > len(data) or data[pos] != 0xFF:
+            raise ValueError("JPEG ends early")
+        marker = data[pos + 1]
+        if marker == 0xFF:                     # fill byte
+            pos += 1
+            continue
+        if marker == 0x01 or 0xD0 <= marker <= 0xD8:
+            out.append(data[pos:pos + 2])
+            pos += 2
+            continue
+        if marker == 0xD9:
+            raise ValueError("JPEG without image data")
+        if pos + 4 > len(data):
+            raise ValueError("JPEG ends early")
+        length = int.from_bytes(data[pos + 2:pos + 4], "big")
+        end = pos + 2 + length
+        if length < 2 or end > len(data):
+            raise ValueError("JPEG segment runs past the end")
+        if marker in _JPEG_SOF:
+            if length < 7:
+                raise ValueError("short SOF")
+            size = (int.from_bytes(data[pos + 7:pos + 9], "big"), int.from_bytes(data[pos + 5:pos + 7], "big"))
+        if marker == 0xDA:                     # start of scan: the rest is image data
+            if size is None:
+                raise ValueError("JPEG without SOF")
+            out.append(data[pos:])
+            return b"".join(out), size[0], size[1]
+        if marker not in _JPEG_DROP:
+            out.append(data[pos:end])
+        pos = end
+
+
+def _clean_webp(data: bytes) -> tuple[bytes, int, int]:
+    limit = 8 + int.from_bytes(data[4:8], "little")
+    if limit > len(data) or limit < 20:
+        raise ValueError("WebP ends before its declared size")
+    out, pos, steps, size, vp8x = bytearray(data[:12]), 12, 0, None, None
+    while pos < limit:
+        steps += 1
+        if steps > MAX_IMAGE_WALK or pos + 8 > limit:
+            raise ValueError("WebP ends inside a chunk")
+        kind = data[pos:pos + 4]
+        length = int.from_bytes(data[pos + 4:pos + 8], "little")
+        end = pos + 8 + length + (length & 1)
+        if end > limit:
+            raise ValueError("WebP chunk runs past the end")
+        body = data[pos + 8:pos + 8 + length]
+        if kind in (b"ANIM", b"ANMF"):
+            raise ValueError("animated WebP")
+        if kind == b"VP8X" and length >= 10:
+            if body[0] & 0x02:
+                raise ValueError("animated WebP")
+            vp8x = len(out) + 8
+            size = (int.from_bytes(body[4:7], "little") + 1, int.from_bytes(body[7:10], "little") + 1)
+        elif kind == b"VP8 " and size is None and length >= 10 and body[3:6] == b"\x9d\x01\x2a":
+            size = (int.from_bytes(body[6:8], "little") & 0x3FFF, int.from_bytes(body[8:10], "little") & 0x3FFF)
+        elif kind == b"VP8L" and size is None and length >= 5 and body[0] == 0x2F:
+            bits = int.from_bytes(body[1:5], "little")
+            size = ((bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1)
+        if kind not in _WEBP_DROP:
+            out += data[pos:end]
+        pos = end
+    if size is None:
+        raise ValueError("WebP without a frame")
+    if vp8x is not None:
+        out[vp8x] &= ~(0x20 | 0x08 | 0x04) & 0xFF       # no ICC, EXIF, XMP
+    out[4:8] = (len(out) - 8).to_bytes(4, "little")
+    return bytes(out), size[0], size[1]
+
+
+def safe_image(data: bytes | None) -> tuple[bytes, int, int] | None:
+    """(bytes without metadata, width, height) of a JPEG, PNG or still WebP within the size caps,
+    or None (another format, malformed, animated, too big)."""
+    if not data:
+        return None
+    try:
+        if data[:8] == PNG_SIGNATURE:
+            cleaned = _clean_png(data)
+        elif data[:3] == b"\xff\xd8\xff":
+            cleaned = _clean_jpeg(data)
+        elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            cleaned = _clean_webp(data)
+        else:
+            return None
+    except (ValueError, IndexError, TypeError):
+        return None
+    return cleaned if _size_ok(cleaned[1], cleaned[2]) else None
+
+
+def load_image(path: str | Path) -> tuple[bytes, int, int] | None:
+    """A theme image read once (read_image) and checked (safe_image), ready for the decoder."""
+    return safe_image(read_image(path))
 
 
 def image_key(path: str | Path) -> tuple | None:
