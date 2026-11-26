@@ -19,9 +19,7 @@ import os
 import re
 import shutil
 import stat
-import subprocess
 import sys
-import threading
 import tomllib
 from pathlib import Path
 
@@ -603,26 +601,8 @@ def theme_manager_toggle() -> Path | None:
 
 
 def _launch(argv: list, timeout: float = 2.0) -> tuple[bool, str]:
-    """Start a program that opens a window of its own and returns (or keeps running with it): fixed
-    argv, no shell, no inherited pipes (the window must not hold ours), its own session, the user's
-    own environment and language. Still running after `timeout` is fine; it is reaped in the
-    background. (The integrator plans a shared plugins_core.launch; this matches task C's.)"""
-    if not argv or not all(isinstance(a, str) and a and "\x00" not in a for a in argv):
-        return False, "invalid command"
-    program = argv[0] if os.path.isabs(argv[0]) else shutil.which(argv[0])
-    if program is None:
-        return False, f"{argv[0]}: not found"
-    try:
-        proc = subprocess.Popen([program, *argv[1:]], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
-    except OSError as exc:
-        return False, str(exc)
-    try:
-        code = proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        threading.Thread(target=proc.wait, daemon=True).start()
-        return True, ""
-    return (True, "") if code == 0 else (False, f"exit {code}")
+    """Detached start of a window (shared: plugins_core.launch)."""
+    return core.launch(argv, timeout)
 
 
 def open_theme_manager() -> dict:

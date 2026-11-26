@@ -17,8 +17,8 @@ from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
 import hypr_core  # noqa: E402
 import network_core  # noqa: E402
-import plugins_core  # noqa: E402
 import system_core  # noqa: E402
+import theme_core  # noqa: E402
 from i18n import _  # noqa: E402
 from ui_helpers import (  # noqa: E402
     clear,
@@ -1226,8 +1226,8 @@ class DesktopPages:
         self._theme_container.append(group)
 
     def _act_open_theme_manager(self) -> None:
-        toggle_fn = getattr(plugins_core, "toggle_plugin", None) or plugins_core.open_plugin
-
+        # Theme Manager's own toggle script, as its bar icon does (the shell's open() needs a
+        # function its BarWidget doesn't have).
         def done(res):
             ok, msg = _unpack_action(res)
             if not ok:
@@ -1235,7 +1235,7 @@ class DesktopPages:
 
         run_async(
             self.app,
-            lambda: toggle_fn(THEME_MANAGER_ID),
+            theme_core.open_theme_manager,
             done,
             busy_text=_("Opening Theme Manager…"),
         )

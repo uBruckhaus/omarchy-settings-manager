@@ -4,7 +4,7 @@ Manage your installed Omarchy shell plugins and Hyprland/Omarchy desktop setting
 laid out like a settings app (a reorderable sidebar of pages left, the page right; modelled on
 Maprisma Settings).
 
-Version 1.0.1 · plugin id `ubruckhaus.settings-manager` · MIT
+Version 1.1.0 · plugin id `ubruckhaus.settings-manager` · MIT
 
 ## Install
 
@@ -16,8 +16,9 @@ omarchy plugin add https://github.com/uBruckhaus/omarchy-settings-manager.git --
 
 Needs nothing beyond what Omarchy ships: Python 3 with PyGObject, GTK 4 and libadwaita, git, curl,
 `wl-paste`, and standard desktop tools (`hyprctl`, `pactl`, `bluetoothctl`, `nmcli`/`iwctl`,
-`powerprofilesctl`, `xdg-mime`, `omarchy-*`). It runs strictly as your user and never asks for
-administrator rights.
+`powerprofilesctl`, `xdg-mime`, `omarchy-*`). It runs as your user. A few changes on the Optimize,
+Time & Language and System apps pages need the administrator password: they ask for it only when you
+click them (polkit, or sudo inside a visible terminal) — see "How it changes things".
 
 ## Remove
 
@@ -32,9 +33,11 @@ Its own files outside the plugin folder, deleted by hand if you want them gone:
 
 ## Pages
 
-All 13 pages live in a scrollable, reorderable sidebar. Drag any page row to reorder it; right-click
+All 21 pages live in a scrollable, reorderable sidebar. Drag any page row to reorder it; right-click
 a row to add or remove custom separators or restore the default order. On narrow windows (under
 720 sp), the sidebar automatically collapses into an overlay drawer toggled from the header bar.
+The Maprisma pages (Maprisma apps, AI) appear when a Maprisma app is installed; Settings › "Show the
+Maprisma pages" (on by default) hides them.
 
 - **Plugins**: every installed plugin, grouped *In the bar*, *Running in the background* and *Not in
   use*, with a filter, update marks and a ⋮ menu: put it in the bar (left, before or after the centre,
@@ -50,11 +53,28 @@ a row to add or remove custom separators or restore the default order. On narrow
   Focused bar rows also support keyboard reordering (`Left` / `Right` to move, `Delete` to take out).
 - **Updates**: the plugins whose git checkout is behind its remote, with the commits an update brings;
   Update or Update all. Plugins without a git remote are listed as "update by hand".
+- **Maprisma apps**: the Maprisma apps on this computer (release archive in `~/.local/lib`, AppImage in
+  `~/Applications`, pacman package, or built from source), with version, a *running* mark and an update
+  mark from each app's latest GitHub release (asked on page load / Refresh only, unauthenticated, cached
+  10 min). ⋮ menu: Open, Details, Show folder, GitHub/release page, remove older AppImage copies (to the
+  trash). Updates and uninstalls of installed apps open **Maprisma Settings** at its Apps page (it swaps
+  running apps safely). Catalog apps that aren't installed and have a release AppImage get **Install**:
+  a visible terminal downloads the AppImage into `~/Applications`, checks GitHub's SHA-256 and never
+  replaces a file (Maprisma Launcher's method). No password needed.
+- **System apps**: every app with a launcher, by source: System packages (explicitly installed pacman
+  packages), AUR, Flatpak, AppImages (older copies grouped), Web apps (Omarchy's and browsers') and
+  Local apps (other launchers, Omarchy TUIs). Marks for updates (`checkupdates`, `yay`/`paru -Qua`,
+  `flatpak remote-ls --updates`), running and start at login; filter; Details (`pacman -Qi`,
+  `flatpak info`). **Needs the admin password** (asked in the terminal, by sudo): Uninstall of a package
+  (`omarchy-pkg-drop`) and Update all / Update the system (`omarchy-update`, Omarchy's full update: Arch
+  has no partial upgrades). Flatpak uninstall/update, web app and TUI removal (`omarchy-webapp-remove`,
+  `omarchy-tui-remove`) run in the same visible terminal without a password; AppImages and local
+  launchers go to the trash (`gio trash`). Every action asks first.
 - **Network**: Wi-Fi, wired and VPN connections via NetworkManager (`nmcli`) or `iwd` (`iwctl`),
   LAN devices and live traffic/socket monitor. Wi-Fi passphrases are never passed on a command line.
 - **Bluetooth**: adapter power, scan, pair/connect/disconnect, trust and remove Bluetooth devices via
   `bluetoothctl`.
-- **Appearance**: Omarchy themes, wallpapers, font/cursor settings and Hyprland look & animations.
+- **Appearance**: Hyprland look & animations, with a link to Theme Manager for colours and wallpapers.
 - **Theme**: Omarchy's themes (yours in `~/.config/omarchy/themes` first, then the stock ones) in a
   grid under a big preview of the selected one: rest the pointer on a card, click it or use the arrow
   keys (else the theme in use is shown). The preview steps through the theme's wallpapers with ‹ ›
@@ -105,40 +125,37 @@ a row to add or remove custom separators or restore the default order. On narrow
   user autostart entries in `~/.config/autostart`.
 - **About**: hardware, OS, kernel, Omarchy version, compositor and session facts with one-click copy.
 - **Settings**: language (8 built in), update check on opening, Omarchy's own plugins in the list,
-  Corners (like the windows, slightly rounded, rounded, square), F12 screenshot key, and app details.
-- **Maprisma apps**: the Maprisma apps on this computer (release archive in `~/.local/lib`, AppImage in
-  `~/Applications`, pacman package, or built from source), with version, a *running* mark and an update
-  mark from each app's latest GitHub release (asked on page load / Refresh only, unauthenticated, cached
-  10 min). ⋮ menu: Open, Details, Show folder, GitHub/release page, remove older AppImage copies (to the
-  trash). Updates and uninstalls of installed apps open **Maprisma Settings** at its Apps page (it swaps
-  running apps safely). Catalog apps that aren't installed and have a release AppImage get **Install**:
-  a visible terminal downloads the AppImage into `~/Applications`, checks GitHub's SHA-256 and never
-  replaces a file (Maprisma Launcher's method). No password needed.
-- **System apps**: every app with a launcher, by source: System packages (explicitly installed pacman
-  packages), AUR, Flatpak, AppImages (older copies grouped), Web apps (Omarchy's and browsers') and
-  Local apps (other launchers, Omarchy TUIs). Marks for updates (`checkupdates`, `yay`/`paru -Qua`,
-  `flatpak remote-ls --updates`), running and start at login; filter; Details (`pacman -Qi`,
-  `flatpak info`). **Needs the admin password** (asked in the terminal, by sudo): Uninstall of a package
-  (`omarchy-pkg-drop`) and Update all / Update the system (`omarchy-update`, Omarchy's full update: Arch
-  has no partial upgrades). Flatpak uninstall/update, web app and TUI removal (`omarchy-webapp-remove`,
-  `omarchy-tui-remove`) run in the same visible terminal without a password; AppImages and local
-  launchers go to the trash (`gio trash`). Every action asks first.
+  the Maprisma pages, Corners (like the windows, slightly rounded, rounded, square), F12 screenshot key, and app details.
 
 Keys: `Ctrl+1…9` first nine pages in current sidebar order · `Ctrl+,` Settings · `Ctrl+F` filter
-plugins · `F5` / `Ctrl+R` reload current page · `Backspace` back from plugin details · `Esc` close
+(the open page's own filter, else the plugins) · `F5` / `Ctrl+R` reload current page · `Backspace` back from plugin details · `Esc` close
 overlay sidebar, go back, or close window · `F12` save a screenshot of the window into
 `~/Pictures/Settings Manager/` (private folder, never over an older file) with an optional note
 beside it.
 
 The bar icon opens or closes the window; right-click opens the Updates page. From a terminal:
-`settings-manager [--page plugins|bar|updates|network|bluetooth|appearance|displays|sound|power|input|applications|about|settings] [--plugin <id>]`.
+`settings-manager [--page plugins|bar|updates|apps|system_apps|network|bluetooth|appearance|theme|displays|sound|notifications|ai|voice|power|optimize|input|applications|time|about|settings] [--plugin <id>]`.
 
 ## How it changes things
 
-### Zero-privilege security model
+### Security model
 
-Settings Manager never elevates privileges and never touches system-wide files. Every action uses
-user-level tools, session IPC or files inside your own home directory:
+Settings Manager runs as your user. Almost everything uses user-level tools, session IPC or files
+in your own home directory. The few system-wide changes happen only when you click them, and each one
+asks for the administrator password itself:
+
+| Page | Change | How |
+| --- | --- | --- |
+| Optimize | DNS provider | `omarchy dns <DHCP\|Cloudflare\|Google>` (Omarchy's script asks polkit); `Custom` in a visible terminal |
+| Optimize | TCP BBR | one `pkexec /bin/sh -c '<constant script>' sh <allowlisted values>`: writes `/etc/sysctl.d/99-zz-settings-manager-network.conf` and runs `sysctl -w` |
+| Optimize | Bluetooth options | one `pkexec` call with a constant script: copies the edited `main.conf` (size-capped, SHA-256 checked) into `/etc/bluetooth` and restarts Bluetooth; asks first |
+| Optimize | Wi-Fi power saving | `nmcli connection modify` (NetworkManager's own polkit rules) |
+| Time & Language | NTP, time zone, language, formats | `timedatectl` / `localectl` (they ask polkit themselves) |
+| System apps | Uninstall a package, Update the system | `omarchy-pkg-drop`, `omarchy-update` in a visible terminal (sudo asks there) |
+| Voice | Install/remove a dictation backend | Omarchy's own installer in a visible terminal |
+
+No value ever reaches a shell: scripts are constant strings, values go in as positional arguments and
+are checked again inside the script. Nothing runs as root in the background.
 
 - **Plugins & Bar**: every change goes through Omarchy's own plugin commands and the shell's IPC;
   the app never writes `shell.json` or a plugin folder itself:
@@ -215,8 +232,12 @@ with its process group. Text from manifests and system tools is cleaned before i
 - `network_core.py`: Wi-Fi, Wired, VPN, LAN devices and network monitor backend
 - `theme.py`: colours from the current Omarchy theme, followed live; `corners.py`: the Corners setting
 - `screenshot.py`: the F12 key
+- `pages_base.py`: the base class of a group of sidebar pages
 - `pages_apps.py`, `apps_core.py`: Maprisma apps and System apps pages and their backend
-- `i18n.py`, `translations/`: interface languages
+- `pages_theme.py`, `theme_core.py`: Theme page and its backend (thumbnails decoded in a limited child process)
+- `pages_services.py`, `services_core.py`: Notifications, AI and Voice pages and their backend
+- `pages_tune.py`, `tune_core.py`: Optimize and Time & Language pages and their backend
+- `i18n.py`, `translations/`: interface languages (`<lang>.json` plus one part file per page module in `<lang>/`)
 - Settings: `~/.config/omarchy/settings-manager/settings.json`
 
 ## Development

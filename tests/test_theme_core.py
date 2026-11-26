@@ -581,16 +581,16 @@ class ThemeManagerTests(ThemeTestCase):
 
     def test_launch_is_detached_and_reports_exit(self):
         script = self.install()
-        with mock.patch.object(tc.subprocess, "Popen") as popen:
+        with mock.patch.object(core.subprocess, "Popen") as popen:
             popen.return_value.wait.return_value = 0
             self.assertEqual(tc._launch([str(script)]), (True, ""))
             kwargs = popen.call_args.kwargs
             self.assertTrue(kwargs["start_new_session"])
             for stream in ("stdin", "stdout", "stderr"):
-                self.assertIs(kwargs[stream], tc.subprocess.DEVNULL)
+                self.assertIs(kwargs[stream], core.subprocess.DEVNULL)
             popen.return_value.wait.return_value = 3
-            self.assertEqual(tc._launch([str(script)]), (False, "exit 3"))
-            popen.return_value.wait.side_effect = [tc.subprocess.TimeoutExpired("x", 2), 0]
+            self.assertEqual(tc._launch([str(script)]), (False, f"{script.name}: exit 3"))
+            popen.return_value.wait.side_effect = [core.subprocess.TimeoutExpired("x", 2), 0]
             self.assertEqual(tc._launch([str(script)]), (True, ""))   # still running: its window is open
         self.assertEqual(tc._launch([]), (False, "invalid command"))
         self.assertEqual(tc._launch(["a\x00b"]), (False, "invalid command"))
