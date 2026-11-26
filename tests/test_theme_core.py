@@ -444,16 +444,34 @@ class ThemeManagerTests(ThemeTestCase):
 
     def test_not_installed(self):
         self.assertIsNone(tc.theme_manager_toggle())
-        self.assertFalse(tc.open_theme_manager()["ok"])
-        self.run.assert_not_called()
+        with mock.patch.object(tc, "_launch") as launch:
+            self.assertFalse(tc.open_theme_manager()["ok"])
+        launch.assert_not_called()
 
     def test_opens_through_its_toggle_script(self):
         script = self.install(folder_name="tm-checkout")       # folder name ≠ id
         self.assertEqual(tc.theme_manager_toggle(), script)
-        self.assertTrue(tc.open_theme_manager()["ok"])
-        argv = self.run.call_args.args[0]
-        self.assertEqual(argv, [str(script)])
-        self.assertIn("LC_ALL", self.run.call_args.kwargs["env"])
+        with mock.patch.object(tc, "_launch", return_value=(True, "")) as launch:
+            self.assertTrue(tc.open_theme_manager()["ok"])
+        launch.assert_called_once_with([str(script)])
+        self.run.assert_not_called()
+
+    def test_launch_is_detached_and_reports_exit(self):
+        script = self.install()
+        with mock.patch.object(tc.subprocess, "Popen") as popen:
+            popen.return_value.wait.return_value = 0
+            self.assertEqual(tc._launch([str(script)]), (True, ""))
+            kwargs = popen.call_args.kwargs
+            self.assertTrue(kwargs["start_new_session"])
+            for stream in ("stdin", "stdout", "stderr"):
+                self.assertIs(kwargs[stream], tc.subprocess.DEVNULL)
+            popen.return_value.wait.return_value = 3
+            self.assertEqual(tc._launch([str(script)]), (False, "exit 3"))
+            popen.return_value.wait.side_effect = tc.subprocess.TimeoutExpired("x", 2)
+            self.assertEqual(tc._launch([str(script)]), (True, ""))   # still running: its window is open
+        self.assertEqual(tc._launch([]), (False, "invalid command"))
+        self.assertEqual(tc._launch(["a\x00b"]), (False, "invalid command"))
+        self.assertFalse(tc._launch(["/nonexistent/theme-toggle"])[0])
 
     def test_refuses_non_executable_writable_or_linked_script(self):
         script = self.install(mode=0o644)
@@ -471,8 +489,8 @@ class ThemeManagerTests(ThemeTestCase):
 
     def test_open_failure_is_reported(self):
         self.install()
-        self.run.return_value = core.Result(2, "", "boom\n")
-        self.assertEqual(tc.open_theme_manager(), {"ok": False, "error": "boom"})
+        with mock.patch.object(tc, "_launch", return_value=(False, "exit 2")):
+            self.assertEqual(tc.open_theme_manager(), {"ok": False, "error": "exit 2"})
 
 
 if __name__ == "__main__":

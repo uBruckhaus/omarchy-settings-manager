@@ -17,6 +17,8 @@ import os
 import re
 import shutil
 import stat
+import subprocess
+import threading
 import tomllib
 from pathlib import Path
 
@@ -549,13 +551,34 @@ def theme_manager_toggle() -> Path | None:
     return script
 
 
+def _launch(argv: list, timeout: float = 2.0) -> tuple[bool, str]:
+    """Start a program that opens a window of its own and returns (or keeps running with it): fixed
+    argv, no shell, no inherited pipes (the window must not hold ours), its own session, the user's
+    own environment and language. Still running after `timeout` is fine; it is reaped in the
+    background. (The integrator plans a shared plugins_core.launch; this matches task C's.)"""
+    if not argv or not all(isinstance(a, str) and a and "\x00" not in a for a in argv):
+        return False, "invalid command"
+    program = argv[0] if os.path.isabs(argv[0]) else shutil.which(argv[0])
+    if program is None:
+        return False, f"{argv[0]}: not found"
+    try:
+        proc = subprocess.Popen([program, *argv[1:]], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+    except OSError as exc:
+        return False, str(exc)
+    try:
+        code = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        threading.Thread(target=proc.wait, daemon=True).start()
+        return True, ""
+    return (True, "") if code == 0 else (False, f"exit {code}")
+
+
 def open_theme_manager() -> dict:
-    """Show Theme Manager's window the way its bar icon does (its toggle script)."""
+    """Show Theme Manager's window the way its bar icon does: its own toggle script, started
+    detached (it starts the window in the background, or signals the running one, and returns)."""
     script = theme_manager_toggle()
     if script is None:
         return {"ok": False, "error": "Theme Manager is not installed"}
-    # plugins_core.run forces LC_ALL=C.UTF-8; the window keeps the user's own locale.
-    result = core.run([str(script)], timeout=15, max_bytes=64 * 1024, env={"LC_ALL": os.environ.get("LC_ALL", "")})
-    if result.ok:
-        return {"ok": True, "error": ""}
-    return {"ok": False, "error": _short(result.err) or _short(result.out) or f"exit {result.code}"}
+    ok, error = _launch([str(script)])
+    return {"ok": ok, "error": error}
