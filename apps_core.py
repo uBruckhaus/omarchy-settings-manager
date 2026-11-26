@@ -7,7 +7,7 @@ Omarchy's own command (`omarchy-pkg-drop`, `omarchy-update`, `omarchy-webapp-rem
 password there. Moving a user file to the trash (`gio trash`) is the only thing done here directly.
 
 Every external command runs through `plugins_core.run` (argument list, no shell, timeout, output
-cap). Every package name, Flatpak id, web app name, path and URL is checked against a strict
+cap), except what opens a window (an app, the terminal): `launch()` starts it detached. Every package name, Flatpak id, web app name, path and URL is checked against a strict
 pattern before it goes into an argument list. Files are read with size caps; links are never
 removed or trashed.
 """
@@ -21,6 +21,7 @@ import re
 import shlex
 import shutil
 import stat
+import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -780,11 +781,28 @@ def open_argv(app: dict, extra: tuple = ()) -> list[str] | None:
     return None
 
 
-def launch(argv: list[str] | None) -> tuple[bool, str]:
-    if not argv:
-        return False, "nothing to start"
-    res = core.run(argv, timeout=15, max_bytes=64 * 1024)
-    return (True, "") if res.ok else (False, system_core._err_text(res))
+def launch(argv: list[str] | None, timeout: float = 2.0) -> tuple[bool, str]:
+    """Start a program that opens a window of its own (an app, the Omarchy terminal) and returns
+    or keeps running. Not through plugins_core.run: a window must not hold our pipes (run would wait
+    for them and end the group at its deadline). Fixed argv, no shell, no inherited pipes, its own
+    session; still running after `timeout` is fine (its window is open) and is reaped in the
+    background. (The integrator moves this into a shared plugins_core.launch.)"""
+    if not argv or not all(_safe_arg(a) for a in argv):
+        return False, "nothing to start" if not argv else "invalid command"
+    program = argv[0] if os.path.isabs(argv[0]) else _which(argv[0])
+    if program is None:
+        return False, f"{argv[0]}: not found"
+    try:
+        proc = subprocess.Popen([program, *argv[1:]], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+    except OSError as exc:
+        return False, str(exc)
+    try:
+        code = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        threading.Thread(target=proc.wait, daemon=True).start()
+        return True, ""
+    return (True, "") if code == 0 else (False, f"{argv[0]}: exit {code}")
 
 
 def run_in_terminal(command: list[str] | None) -> tuple[bool, str]:

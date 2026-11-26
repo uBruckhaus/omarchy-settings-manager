@@ -471,14 +471,38 @@ class CommandTests(Sandbox):
         self.assertEqual(ac.open_argv({"program": str(image)}, ("--page", "apps"))[-2:], ["--page", "apps"])
         self.assertIsNone(ac.open_argv({"program": str(image)}, ("--page", "a\nb")))
 
-    def test_launch_and_terminal_go_through_run(self):
-        self.fake.table[("uwsm-app",)] = core.Result(0)
-        self.assertEqual(ac.run_in_terminal(["omarchy-update"]), (True, ""))
-        self.assertEqual(self.fake.calls[-1][0], "uwsm-app")
-        self.assertEqual(ac.run_in_terminal(["bad\ncommand"]), (False, "invalid command"))
-        self.assertEqual(ac.launch(None), (False, "nothing to start"))
-        self.fake.table[("uwsm-app",)] = core.Result(1, "", "uwsm: no such unit\n")
-        self.assertEqual(ac.launch(["uwsm-app", "x"]), (False, "uwsm: no such unit"))
+    def test_launch_is_detached_and_never_uses_run(self):
+        class Proc:
+            def __init__(self, code):
+                self.code = code
+
+            def wait(self, timeout=None):
+                if self.code is None:
+                    raise ac.subprocess.TimeoutExpired("x", timeout)
+                return self.code
+
+        with mock.patch.object(ac.subprocess, "Popen", return_value=Proc(0)) as popen:
+            self.assertEqual(ac.run_in_terminal(["omarchy-update"]), (True, ""))
+            argv = popen.call_args.args[0]
+            kwargs = popen.call_args.kwargs
+            self.assertEqual(argv[0], "/usr/bin/uwsm-app")
+            self.assertEqual(argv[-1], "omarchy-update")
+            self.assertTrue(kwargs["start_new_session"])
+            for stream in ("stdin", "stdout", "stderr"):
+                self.assertIs(kwargs[stream], ac.subprocess.DEVNULL)
+            self.assertEqual(ac.run_in_terminal(["bad\ncommand"]), (False, "invalid command"))
+            self.assertEqual(ac.launch(None), (False, "nothing to start"))
+            self.assertEqual(ac.launch(["uwsm-app", "a\x00b"]), (False, "invalid command"))
+            self.assertEqual(popen.call_count, 1)
+        with mock.patch.object(ac.subprocess, "Popen", return_value=Proc(None)):
+            self.assertEqual(ac.launch(["uwsm-app", "x"]), (True, ""))          # still running: its window
+        with mock.patch.object(ac.subprocess, "Popen", return_value=Proc(1)):
+            self.assertEqual(ac.launch(["uwsm-app", "x"]), (False, "uwsm-app: exit 1"))
+        with mock.patch.object(ac.subprocess, "Popen", side_effect=OSError("denied")):
+            self.assertEqual(ac.launch(["uwsm-app", "x"]), (False, "denied"))
+        self.tools.discard("uwsm-app")
+        self.assertEqual(ac.launch(["uwsm-app", "x"]), (False, "uwsm-app: not found"))
+        self.assertEqual(self.fake.calls, [])
 
     def test_trash_refuses_links_folders_and_other_places(self):
         self.fake.table[("gio", "trash")] = core.Result(0)
