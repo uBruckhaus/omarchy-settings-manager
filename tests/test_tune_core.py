@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import os
 import struct
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -34,14 +34,77 @@ SAMPLE_LOCALECTL_STATUS = """System Locale: LANG=en_US.UTF-8
    X11 Layout: de
 """
 
+SAMPLE_LOCALECTL_WITH_LANGUAGE = """System Locale: LANG=de_DE.UTF-8
+               LANGUAGE=de_DE:en_US
+               LC_TIME=de_DE.UTF-8
+               LC_MEASUREMENT=de_DE.UTF-8
+    VC Keymap: de
+   X11 Layout: de
+"""
+
 
 def _which_map(mapping: dict[str, str | None]):
     return lambda name: mapping.get(name)
 
 
-# --- 1. Mirrors tests ----------------------------------------------------------------------------
+def _simulate_root_file_ops(argv: list[str], *, tamper: bytes | None = None, captured: list[str] | None = None):
+    """Emulate pkexec install/mv/rm on temp test directories (never touches real system paths)."""
+    if argv[:2] == ["pkexec", "/usr/bin/install"]:
+        src = Path(argv[-2])
+        dst = Path(argv[-1])
+        data = src.read_bytes()
+        if captured is not None:
+            captured.append(data.decode("utf-8", "replace"))
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(tamper if tamper is not None else data)
+        return core.Result(0, "")
+    if argv[:4] == ["pkexec", "/usr/bin/mv", "-f", "--"]:
+        Path(argv[4]).replace(Path(argv[5]))
+        return core.Result(0, "")
+    if argv[:4] == ["pkexec", "/usr/bin/rm", "-f", "--"]:
+        target = Path(argv[4])
+        if target.exists() or target.is_symlink():
+            target.unlink()
+        return core.Result(0, "")
+    return None
 
-class MirrorsTest(unittest.TestCase):
+
+# --- 1. Mirrors & detached terminal launch tests -------------------------------------------------
+
+class MirrorsAndLaunchTest(unittest.TestCase):
+    def test_launch_detached_success_timeout_and_errors(self):
+        # Fast exit 0 -> (True, "")
+        fake_proc = mock.MagicMock()
+        fake_proc.wait.return_value = 0
+        with mock.patch.object(tc.subprocess, "Popen", return_value=fake_proc) as popen:
+            ok, err = tc.launch(["/usr/bin/true"])
+        self.assertTrue(ok, err)
+        kwargs = popen.call_args.kwargs
+        self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
+        self.assertEqual(kwargs["stdout"], subprocess.DEVNULL)
+        self.assertEqual(kwargs["stderr"], subprocess.DEVNULL)
+        self.assertTrue(kwargs["start_new_session"])
+        self.assertTrue(kwargs["close_fds"])
+
+        # Still running after timeout (window opened) -> (True, "") and reaped in background
+        running_proc = mock.MagicMock()
+        running_proc.wait.side_effect = [subprocess.TimeoutExpired(["x"], 2.0), 0]
+        with mock.patch.object(tc.subprocess, "Popen", return_value=running_proc):
+            ok, err = tc.launch(["/usr/bin/true"], timeout=0.01)
+        self.assertTrue(ok, err)
+
+        # Immediate non-zero exit -> (False, "exit 2")
+        bad_proc = mock.MagicMock()
+        bad_proc.wait.return_value = 2
+        with mock.patch.object(tc.subprocess, "Popen", return_value=bad_proc):
+            ok, err = tc.launch(["/usr/bin/false"])
+        self.assertFalse(ok)
+        self.assertIn("exit 2", err)
+
+        # Invalid argv rejected
+        self.assertFalse(tc.launch([])[0])
+        self.assertFalse(tc.launch(["/usr/bin/true", "bad\x00arg"])[0])
+
     def test_omarchy_pinned_mirrors_read_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -67,6 +130,7 @@ class MirrorsTest(unittest.TestCase):
                     "pkexec": "/usr/bin/pkexec",
                 })),
                 mock.patch.object(core, "run", return_value=core.Result(0, "rc\n")) as run,
+                mock.patch.object(tc, "launch") as launch_mock,
             ):
                 info = tc.read_mirrors()
                 self.assertTrue(info["ok"])
@@ -83,11 +147,11 @@ class MirrorsTest(unittest.TestCase):
                 ok, err = tc.rank_mirrors_in_terminal()
                 self.assertFalse(ok)
                 self.assertIn("Omarchy", err)
-                # Only omarchy-channel-current was called, never xdg-terminal-exec or pkexec
+                launch_mock.assert_not_called()
                 for call in run.call_args_list:
                     self.assertEqual(call[0][0], ["omarchy-channel-current"])
 
-    def test_custom_arch_mirrors_allow_terminal_ranking(self):
+    def test_custom_arch_mirrors_detached_terminal_and_usr_bin_enforcement(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             pacman_dir = root / "pacman.d"
@@ -102,6 +166,7 @@ class MirrorsTest(unittest.TestCase):
             pacman_conf = root / "pacman.conf"
             pacman_conf.write_text("[core]\nInclude = /etc/pacman.d/mirrorlist\n", encoding="utf-8")
 
+            # Valid /usr/bin/reflector launches detached via tc.launch with absolute paths
             with (
                 mock.patch.object(tc, "PACMAN_DIR", pacman_dir),
                 mock.patch.object(tc, "PACMAN_MIRRORLIST", mirrorlist),
@@ -109,9 +174,11 @@ class MirrorsTest(unittest.TestCase):
                 mock.patch.object(tc.shutil, "which", side_effect=_which_map({
                     "reflector": "/usr/bin/reflector",
                     "xdg-terminal-exec": "/usr/bin/xdg-terminal-exec",
+                    "uwsm-app": "/usr/bin/uwsm-app",
                     "pkexec": "/usr/bin/pkexec",
                 })),
-                mock.patch.object(core, "run", return_value=core.Result(0, "")) as run,
+                mock.patch.object(core, "run") as run,
+                mock.patch.object(tc, "launch", return_value=(True, "")) as launch_mock,
             ):
                 info = tc.read_mirrors()
                 self.assertFalse(info["omarchy_managed"])
@@ -121,8 +188,32 @@ class MirrorsTest(unittest.TestCase):
 
                 ok, err = tc.rank_mirrors_in_terminal()
                 self.assertTrue(ok, err)
-                argv = run.call_args[0][0]
-                self.assertEqual(argv[:4], ["xdg-terminal-exec", "--", "pkexec", "reflector"])
+                run.assert_not_called()
+                argv = launch_mock.call_args[0][0]
+                self.assertEqual(argv[:4], ["uwsm-app", "-t", "service", "--"])
+                self.assertIn("xdg-terminal-exec", argv)
+                idx = argv.index("settings-manager")
+                self.assertEqual(argv[idx + 1 : idx + 3], ["/usr/bin/pkexec", "/usr/bin/reflector"])
+
+            # Tool outside /usr/bin (e.g. ~/.local/bin) is refused
+            with (
+                mock.patch.object(tc, "PACMAN_DIR", pacman_dir),
+                mock.patch.object(tc, "PACMAN_MIRRORLIST", mirrorlist),
+                mock.patch.object(tc, "PACMAN_CONF", pacman_conf),
+                mock.patch.object(tc.shutil, "which", side_effect=_which_map({
+                    "reflector": "/home/uwe/.local/bin/reflector",
+                    "rate-mirrors": "/home/uwe/.cargo/bin/rate-mirrors",
+                    "xdg-terminal-exec": "/usr/bin/xdg-terminal-exec",
+                    "pkexec": "/usr/bin/pkexec",
+                })),
+                mock.patch.object(tc, "launch") as launch_mock,
+            ):
+                info = tc.read_mirrors()
+                self.assertIsNone(info["rank_tool"])
+                self.assertFalse(info["can_rank_in_terminal"])
+                ok, _err = tc.rank_mirrors_in_terminal()
+                self.assertFalse(ok)
+                launch_mock.assert_not_called()
 
     def test_mirrorlist_symlink_and_oversized_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -223,22 +314,88 @@ class NetworkTuneTest(unittest.TestCase):
             # global omarchy-wifi-powersave.conf sets 2 -> off
             self.assertFalse(data["wifi"]["powersave"])
 
-    def test_set_dns_provider_allowlist_and_custom_terminal(self):
+    def test_ethernet_plus_wifi_and_resolvectl_ipv6_continuations(self):
+        eth_uuid = "11111111-2222-3333-4444-555555555555"
+        wifi_uuid = "6fbf7ecc-91c7-4937-acdb-b6843d8108f0"
+
+        resolvectl_out = (
+            "Global\n"
+            "  Fallback DNS Servers: 9.9.9.9\n\n"
+            "Link 2 (enp16s0)\n"
+            "Current DNS Server: 192.168.178.1\n"
+            "       DNS Servers: 192.168.178.1 fd27:ff18:a181:0:1e23:a2ff:fe92:2a6c\n"
+            "                    2003:d5:2f0d:2300:1e23:a2ff:fe92:2a6c\n"
+            "     Default Route: yes\n"
+        )
+
+        def fake_run(argv, **_kw):
+            if argv[:4] == ["nmcli", "-t", "-f", "NAME,UUID,TYPE,DEVICE"]:
+                return core.Result(
+                    0,
+                    f"Wired:{eth_uuid}:802-3-ethernet:enp16s0\n"
+                    f"HomeWiFi:{wifi_uuid}:802-11-wireless:wlp15s0\n",
+                )
+            if argv == ["ip", "route", "show", "default"]:
+                return core.Result(0, "default via 192.168.178.1 dev enp16s0 proto dhcp metric 100\n")
+            if argv[:4] == ["nmcli", "-t", "-f", "IP4.DNS,IP6.DNS"]:
+                return core.Result(0, "")  # force resolvectl fallback
+            if argv == ["resolvectl", "status"]:
+                return core.Result(0, resolvectl_out)
+            if argv[:4] == ["nmcli", "-t", "-g", "802-11-wireless.powersave"]:
+                return core.Result(0, "3\n")
+            if argv == ["omarchy", "dns"]:
+                return core.Result(0, "DHCP\n")
+            return core.Result(0, "")
+
+        with (
+            mock.patch.object(tc.shutil, "which", side_effect=_which_map({
+                "nmcli": "/usr/bin/nmcli",
+                "ip": "/usr/bin/ip",
+                "resolvectl": "/usr/bin/resolvectl",
+                "omarchy": "/usr/share/omarchy/bin/omarchy",
+                "xdg-terminal-exec": "/usr/bin/xdg-terminal-exec",
+                "pkexec": "/usr/bin/pkexec",
+            })),
+            mock.patch.object(core, "run", side_effect=fake_run),
+        ):
+            data = tc.read_network_tune()
+            self.assertEqual(data["connection"]["device"], "enp16s0")
+            self.assertIsNotNone(data["wifi"])
+            self.assertEqual(data["wifi"]["device"], "wlp15s0")
+            self.assertEqual(data["wifi"]["uuid"], wifi_uuid)
+            self.assertTrue(data["wifi"]["powersave"])
+            self.assertEqual(
+                data["dns"]["current"],
+                [
+                    "192.168.178.1",
+                    "fd27:ff18:a181:0:1e23:a2ff:fe92:2a6c",
+                    "2003:d5:2f0d:2300:1e23:a2ff:fe92:2a6c",
+                ],
+            )
+
+    def test_set_dns_provider_allowlist_and_custom_terminal_detached(self):
         with (
             mock.patch.object(tc.shutil, "which", side_effect=_which_map({
                 "omarchy": "/usr/share/omarchy/bin/omarchy",
                 "xdg-terminal-exec": "/usr/bin/xdg-terminal-exec",
+                "uwsm-app": "/usr/bin/uwsm-app",
             })),
             mock.patch.object(core, "run", return_value=core.Result(0, "")) as run,
+            mock.patch.object(tc, "launch", return_value=(True, "")) as launch_mock,
         ):
             for provider in ("DHCP", "Cloudflare", "Google"):
                 ok, err = tc.set_dns_provider(provider)
                 self.assertTrue(ok, err)
                 self.assertEqual(run.call_args[0][0], ["omarchy", "dns", provider])
 
+            run.reset_mock()
             ok, err = tc.open_custom_dns_terminal()
             self.assertTrue(ok, err)
-            self.assertEqual(run.call_args[0][0], ["xdg-terminal-exec", "--", "omarchy", "dns", "Custom"])
+            run.assert_not_called()
+            argv = launch_mock.call_args[0][0]
+            self.assertEqual(argv[:4], ["uwsm-app", "-t", "service", "--"])
+            idx = argv.index("settings-manager")
+            self.assertEqual(argv[idx + 1 :], ["omarchy", "dns", "Custom"])
 
         # Hostile or unsupported inputs rejected without calling core.run
         with (
@@ -285,20 +442,24 @@ class NetworkTuneTest(unittest.TestCase):
             res_stub = tc.test_dns_latency("127.0.0.53")
         self.assertNotIn("current", res_stub["results"])
 
-    def test_set_bbr_fixed_argv_and_symlink_refusal(self):
+    def test_set_bbr_atomic_verified_runtime_sysctl_and_symlink_refusal(self):
         with tempfile.TemporaryDirectory() as tmp:
-            sysctl_dir = Path(tmp) / "sysctl.d"
+            root = Path(tmp)
+            sys_sysctl_dir = root / "usr_sysctl.d"
+            sys_sysctl_dir.mkdir()
+            sysctl_dir = root / "sysctl.d"
             sysctl_dir.mkdir()
             bbr_file = sysctl_dir / "99-zz-settings-manager-network.conf"
             captured_contents: list[str] = []
 
             def fake_run(argv, **_kw):
-                if argv[:2] == ["pkexec", "/usr/bin/install"]:
-                    src = Path(argv[-2])
-                    captured_contents.append(src.read_text(encoding="utf-8"))
+                sim = _simulate_root_file_ops(argv, captured=captured_contents)
+                if sim is not None:
+                    return sim
                 return core.Result(0, "")
 
             with (
+                mock.patch.object(tc, "SYSCTL_SYSTEM_DIR", sys_sysctl_dir),
                 mock.patch.object(tc, "SYSCTL_DIR", sysctl_dir),
                 mock.patch.object(tc, "SYSCTL_BBR_FILE", bbr_file),
                 mock.patch.object(tc.shutil, "which", side_effect=_which_map({"pkexec": "/usr/bin/pkexec"})),
@@ -306,25 +467,53 @@ class NetworkTuneTest(unittest.TestCase):
             ):
                 ok, err = tc.set_bbr(True)
                 self.assertTrue(ok, err)
-                self.assertIn("net.ipv4.tcp_congestion_control = bbr", captured_contents[-1])
-                self.assertIn("net.core.default_qdisc = fq", captured_contents[-1])
-                self.assertEqual(run.call_args_list[0][0][0][:8], [
-                    "pkexec", "/usr/bin/install", "-D", "-m", "0644", "-o", "0", "-g",
-                ])
-                self.assertEqual(run.call_args_list[1][0][0], [
-                    "pkexec", "/usr/bin/sysctl", "-q", "-p", str(bbr_file),
+                self.assertIn("net.ipv4.tcp_congestion_control = bbr", bbr_file.read_text(encoding="utf-8"))
+                self.assertIn("net.core.default_qdisc = fq", bbr_file.read_text(encoding="utf-8"))
+                argvs = [c[0][0] for c in run.call_args_list]
+                self.assertEqual(argvs[0][:8], ["pkexec", "/usr/bin/install", "-D", "-m", "0644", "-o", "0", "-g"])
+                self.assertTrue(argvs[0][-1].endswith(".99-zz-settings-manager-network.conf.sm-tmp"))
+                self.assertEqual(argvs[1][:4], ["pkexec", "/usr/bin/mv", "-f", "--"])
+                self.assertEqual(argvs[2], [
+                    "pkexec", "/usr/bin/sysctl", "-q", "-w",
+                    "net.core.default_qdisc=fq", "net.ipv4.tcp_congestion_control=bbr",
                 ])
 
+                run.reset_mock()
                 ok, err = tc.set_bbr(False)
                 self.assertTrue(ok, err)
-                self.assertIn("net.ipv4.tcp_congestion_control = cubic", captured_contents[-1])
-                self.assertIn("net.core.default_qdisc = fq_codel", captured_contents[-1])
+                self.assertIn("net.ipv4.tcp_congestion_control = cubic", bbr_file.read_text(encoding="utf-8"))
+                self.assertEqual(run.call_args_list[-1][0][0], [
+                    "pkexec", "/usr/bin/sysctl", "-q", "-w",
+                    "net.core.default_qdisc=fq_codel", "net.ipv4.tcp_congestion_control=cubic",
+                ])
+
+            # When Omarchy's 99-omarchy-sysctl.conf already sets BBR+fq, turning BBR on removes our drop-in
+            (sysctl_dir / "99-omarchy-sysctl.conf").write_text(
+                "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\n", encoding="utf-8"
+            )
+            with (
+                mock.patch.object(tc, "SYSCTL_SYSTEM_DIR", sys_sysctl_dir),
+                mock.patch.object(tc, "SYSCTL_DIR", sysctl_dir),
+                mock.patch.object(tc, "SYSCTL_BBR_FILE", bbr_file),
+                mock.patch.object(tc.shutil, "which", return_value="/usr/bin/pkexec"),
+                mock.patch.object(core, "run", side_effect=fake_run) as run,
+            ):
+                ok, err = tc.set_bbr(True)
+                self.assertTrue(ok, err)
+                self.assertFalse(bbr_file.exists())
+                argvs = [c[0][0] for c in run.call_args_list]
+                self.assertEqual(argvs[0], ["pkexec", "/usr/bin/rm", "-f", "--", str(bbr_file)])
+                self.assertEqual(argvs[1], [
+                    "pkexec", "/usr/bin/sysctl", "-q", "-w",
+                    "net.core.default_qdisc=fq", "net.ipv4.tcp_congestion_control=bbr",
+                ])
 
             # Symlink target refused without invoking pkexec
-            other = Path(tmp) / "other"
+            other = root / "other"
             other.write_text("x", encoding="utf-8")
             bbr_file.symlink_to(other)
             with (
+                mock.patch.object(tc, "SYSCTL_SYSTEM_DIR", sys_sysctl_dir),
                 mock.patch.object(tc, "SYSCTL_DIR", sysctl_dir),
                 mock.patch.object(tc, "SYSCTL_BBR_FILE", bbr_file),
                 mock.patch.object(tc.shutil, "which", return_value="/usr/bin/pkexec"),
@@ -339,39 +528,124 @@ class NetworkTuneTest(unittest.TestCase):
         for bad in (1, 0, "true", None):
             self.assertFalse(tc.set_bbr(bad)[0])
 
-    def test_set_bbr_pkexec_cancelled(self):
+    def test_set_bbr_readback_mismatch_removes_temp_and_aborts(self):
         with tempfile.TemporaryDirectory() as tmp:
-            sysctl_dir = Path(tmp) / "sysctl.d"
+            root = Path(tmp)
+            sys_sysctl_dir = root / "usr_sysctl.d"
+            sys_sysctl_dir.mkdir()
+            sysctl_dir = root / "sysctl.d"
             sysctl_dir.mkdir()
             bbr_file = sysctl_dir / "99-zz-settings-manager-network.conf"
+            tmp_file = sysctl_dir / ".99-zz-settings-manager-network.conf.sm-tmp"
+
+            def fake_run(argv, **_kw):
+                sim = _simulate_root_file_ops(argv, tamper=b"kernel.core_pattern=|/tmp/evil\n")
+                if sim is not None:
+                    return sim
+                return core.Result(0, "")
+
             with (
+                mock.patch.object(tc, "SYSCTL_SYSTEM_DIR", sys_sysctl_dir),
+                mock.patch.object(tc, "SYSCTL_DIR", sysctl_dir),
+                mock.patch.object(tc, "SYSCTL_BBR_FILE", bbr_file),
+                mock.patch.object(tc.shutil, "which", return_value="/usr/bin/pkexec"),
+                mock.patch.object(core, "run", side_effect=fake_run) as run,
+            ):
+                ok, err = tc.set_bbr(False)
+                self.assertFalse(ok)
+                self.assertIn("match", err.lower())
+                self.assertFalse(tmp_file.exists())
+                self.assertFalse(bbr_file.exists())
+                argvs = [c[0][0] for c in run.call_args_list]
+                self.assertEqual(argvs[0][:2], ["pkexec", "/usr/bin/install"])
+                self.assertEqual(argvs[1], ["pkexec", "/usr/bin/rm", "-f", "--", str(tmp_file)])
+                # Neither mv nor sysctl was ever called
+                for argv in argvs:
+                    self.assertNotIn("/usr/bin/mv", argv)
+                    self.assertNotIn("/usr/bin/sysctl", argv)
+
+    def test_set_bbr_pkexec_cancelled_and_partial_reboot_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sys_sysctl_dir = root / "usr_sysctl.d"
+            sys_sysctl_dir.mkdir()
+            sysctl_dir = root / "sysctl.d"
+            sysctl_dir.mkdir()
+            bbr_file = sysctl_dir / "99-zz-settings-manager-network.conf"
+
+            # Cancel on first prompt -> False with "Cancelled"
+            with (
+                mock.patch.object(tc, "SYSCTL_SYSTEM_DIR", sys_sysctl_dir),
                 mock.patch.object(tc, "SYSCTL_DIR", sysctl_dir),
                 mock.patch.object(tc, "SYSCTL_BBR_FILE", bbr_file),
                 mock.patch.object(tc.shutil, "which", return_value="/usr/bin/pkexec"),
                 mock.patch.object(core, "run", return_value=core.Result(126, "", "dismissed")),
             ):
-                ok, err = tc.set_bbr(True)
+                ok, err = tc.set_bbr(False)
                 self.assertFalse(ok)
                 self.assertIn("Cancelled", err)
 
-    def test_set_wifi_powersave_validates_and_runs_nmcli(self):
-        uuid = "6fbf7ecc-91c7-4937-acdb-b6843d8108f0"
+            # Cancel on runtime sysctl -w after drop-in installed -> (True, "reboot")
+            def fake_run_cancel_apply(argv, **_kw):
+                sim = _simulate_root_file_ops(argv)
+                if sim is not None:
+                    return sim
+                if argv[:2] == ["pkexec", "/usr/bin/sysctl"]:
+                    return core.Result(126, "", "dismissed")
+                return core.Result(0, "")
+
+            with (
+                mock.patch.object(tc, "SYSCTL_SYSTEM_DIR", sys_sysctl_dir),
+                mock.patch.object(tc, "SYSCTL_DIR", sysctl_dir),
+                mock.patch.object(tc, "SYSCTL_BBR_FILE", bbr_file),
+                mock.patch.object(tc.shutil, "which", return_value="/usr/bin/pkexec"),
+                mock.patch.object(core, "run", side_effect=fake_run_cancel_apply),
+            ):
+                ok, msg = tc.set_bbr(False)
+                self.assertTrue(ok)
+                self.assertEqual(msg, "reboot")
+                self.assertTrue(bbr_file.exists())
+
+    def test_set_wifi_powersave_reapply_failure_is_reconnect_info(self):
+        eth_uuid = "11111111-2222-3333-4444-555555555555"
+        wifi_uuid = "6fbf7ecc-91c7-4937-acdb-b6843d8108f0"
         calls: list[list[str]] = []
 
-        def fake_run(argv, **_kw):
+        def fake_run_ok(argv, **_kw):
             calls.append(argv)
             if argv[:4] == ["nmcli", "-t", "-f", "NAME,UUID,TYPE,DEVICE"]:
-                return core.Result(0, f"Home:{uuid}:802-11-wireless:wlp15s0\n")
+                return core.Result(
+                    0,
+                    f"Wired:{eth_uuid}:802-3-ethernet:enp16s0\n"
+                    f"Home:{wifi_uuid}:802-11-wireless:wlp15s0\n",
+                )
             return core.Result(0, "")
 
         with (
             mock.patch.object(tc.shutil, "which", return_value="/usr/bin/nmcli"),
-            mock.patch.object(core, "run", side_effect=fake_run),
+            mock.patch.object(core, "run", side_effect=fake_run_ok),
         ):
-            ok, err = tc.set_wifi_powersave(False)
-            self.assertTrue(ok, err)
-            self.assertIn(["nmcli", "connection", "modify", "uuid", uuid, "802-11-wireless.powersave", "2"], calls)
+            ok, msg = tc.set_wifi_powersave(False)
+            self.assertTrue(ok)
+            self.assertEqual(msg, "")
+            self.assertIn(["nmcli", "connection", "modify", "uuid", wifi_uuid, "802-11-wireless.powersave", "2"], calls)
             self.assertIn(["nmcli", "device", "reapply", "wlp15s0"], calls)
+
+        # When device reapply fails (NM rejects 802-11-wireless.powersave live), return (True, "reconnect")
+        def fake_run_reapply_fail(argv, **_kw):
+            if argv[:4] == ["nmcli", "-t", "-f", "NAME,UUID,TYPE,DEVICE"]:
+                return core.Result(0, f"Home:{wifi_uuid}:802-11-wireless:wlp15s0\n")
+            if argv[:3] == ["nmcli", "device", "reapply"]:
+                return core.Result(10, "", "Error: Can't reapply changes to '802-11-wireless.powersave' setting")
+            return core.Result(0, "")
+
+        with (
+            mock.patch.object(tc.shutil, "which", return_value="/usr/bin/nmcli"),
+            mock.patch.object(core, "run", side_effect=fake_run_reapply_fail),
+        ):
+            ok, msg = tc.set_wifi_powersave(True)
+            self.assertTrue(ok)
+            self.assertEqual(msg, "reconnect")
 
         # Bad types rejected
         self.assertFalse(tc.set_wifi_powersave("off")[0])
@@ -405,15 +679,16 @@ class BluetoothTuneTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             tc.update_bluetooth_conf(SAMPLE_BT_CONF, "General", "FastConnectable", "true\nExec=evil")
 
-    def test_read_and_set_bluetooth_option(self):
+    def test_read_and_set_bluetooth_option_atomic(self):
         with tempfile.TemporaryDirectory() as tmp:
             bt_conf = Path(tmp) / "main.conf"
             bt_conf.write_text(SAMPLE_BT_CONF, encoding="utf-8")
             staged_text: list[str] = []
 
             def fake_run(argv, **_kw):
-                if argv[:2] == ["pkexec", "/usr/bin/install"]:
-                    staged_text.append(Path(argv[-2]).read_text(encoding="utf-8"))
+                sim = _simulate_root_file_ops(argv, captured=staged_text)
+                if sim is not None:
+                    return sim
                 return core.Result(0, "")
 
             with (
@@ -433,13 +708,60 @@ class BluetoothTuneTest(unittest.TestCase):
 
                 ok, err = tc.set_bluetooth_option("Experimental", True)
                 self.assertTrue(ok, err)
-                self.assertIn("Experimental = true\n", staged_text[-1])
-                self.assertEqual(run.call_args_list[0][0][0][:2], ["pkexec", "/usr/bin/install"])
-                self.assertEqual(run.call_args_list[1][0][0], ["systemctl", "try-restart", "bluetooth.service"])
+                self.assertIn("Experimental = true\n", bt_conf.read_text(encoding="utf-8"))
+                argvs = [c[0][0] for c in run.call_args_list]
+                self.assertEqual(argvs[0][:2], ["pkexec", "/usr/bin/install"])
+                self.assertTrue(argvs[0][-1].endswith(".main.conf.sm-tmp"))
+                self.assertEqual(argvs[1][:4], ["pkexec", "/usr/bin/mv", "-f", "--"])
+                self.assertEqual(argvs[2], ["systemctl", "try-restart", "bluetooth.service"])
 
                 ok, err = tc.set_bluetooth_option("ReconnectAttempts", 15)
                 self.assertTrue(ok, err)
-                self.assertIn("ReconnectAttempts = 15\n", staged_text[-1])
+                self.assertIn("ReconnectAttempts = 15\n", bt_conf.read_text(encoding="utf-8"))
+
+    def test_bluetooth_readback_mismatch_and_non_utf8_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bt_conf = Path(tmp) / "main.conf"
+            bt_conf.write_text(SAMPLE_BT_CONF, encoding="utf-8")
+            tmp_bt = Path(tmp) / ".main.conf.sm-tmp"
+
+            def fake_run_tamper(argv, **_kw):
+                sim = _simulate_root_file_ops(argv, tamper=b"[General]\nEvil=true\n")
+                if sim is not None:
+                    return sim
+                return core.Result(0, "")
+
+            with (
+                mock.patch.object(tc, "BT_MAIN_CONF", bt_conf),
+                mock.patch.object(tc.shutil, "which", side_effect=_which_map({
+                    "pkexec": "/usr/bin/pkexec",
+                    "systemctl": "/usr/bin/systemctl",
+                })),
+                mock.patch.object(core, "run", side_effect=fake_run_tamper) as run,
+            ):
+                ok, err = tc.set_bluetooth_option("FastConnectable", True)
+                self.assertFalse(ok)
+                self.assertIn("match", err.lower())
+                # Original main.conf untouched, temp removed, bluetooth never restarted
+                self.assertEqual(bt_conf.read_text(encoding="utf-8"), SAMPLE_BT_CONF)
+                self.assertFalse(tmp_bt.exists())
+                argvs = [c[0][0] for c in run.call_args_list]
+                self.assertEqual(argvs[1], ["pkexec", "/usr/bin/rm", "-f", "--", str(tmp_bt)])
+                for argv in argvs:
+                    self.assertNotIn("/usr/bin/mv", argv)
+                    self.assertNotIn("systemctl", argv)
+
+            # Non-UTF-8 bytes in main.conf refused before pkexec
+            bt_conf.write_bytes(b"[General]\n# caf\xe9\n#FastConnectable = false\n")
+            with (
+                mock.patch.object(tc, "BT_MAIN_CONF", bt_conf),
+                mock.patch.object(tc.shutil, "which", return_value="/usr/bin/pkexec"),
+                mock.patch.object(core, "run") as run,
+            ):
+                ok, err = tc.set_bluetooth_option("FastConnectable", True)
+                self.assertFalse(ok)
+                self.assertIn("utf-8", err.lower())
+                run.assert_not_called()
 
     def test_bluetooth_hostile_inputs_and_symlink_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -515,6 +837,66 @@ class TimeLangTest(unittest.TestCase):
         self.assertEqual(data["locale"]["lang"], "en_US.UTF-8")
         self.assertEqual(data["locale"]["formats"], "de_DE.UTF-8")
         self.assertEqual(data["locale"]["locales"], ["C.UTF-8", "de_DE.UTF-8", "en_US.UTF-8"])
+
+    def test_localectl_preserves_language_colon_list_and_following_lc_vars(self):
+        ok, parsed, err = tc.parse_localectl_status_strict(SAMPLE_LOCALECTL_WITH_LANGUAGE)
+        self.assertTrue(ok, err)
+        self.assertEqual(parsed, {
+            "LANG": "de_DE.UTF-8",
+            "LANGUAGE": "de_DE:en_US",
+            "LC_TIME": "de_DE.UTF-8",
+            "LC_MEASUREMENT": "de_DE.UTF-8",
+        })
+
+        # Unset System Locale is accepted as empty dict
+        ok_unset, parsed_unset, _ = tc.parse_localectl_status_strict("System Locale: n/a\n    VC Keymap: de\n")
+        self.assertTrue(ok_unset)
+        self.assertEqual(parsed_unset, {})
+
+        def fake_run(argv, **_kw):
+            if argv == ["localectl", "list-locales"]:
+                return core.Result(0, "C.UTF-8\nde_DE.UTF-8\nen_US.UTF-8\n")
+            if argv == ["localectl", "status"]:
+                return core.Result(0, SAMPLE_LOCALECTL_WITH_LANGUAGE)
+            return core.Result(0, "")
+
+        with (
+            mock.patch.object(tc.shutil, "which", side_effect=_which_map({"localectl": "/usr/bin/localectl"})),
+            mock.patch.object(core, "run", side_effect=fake_run) as run,
+        ):
+            ok, err = tc.set_locale(lang="en_US.UTF-8")
+            self.assertTrue(ok, err)
+            argv = run.call_args[0][0]
+            self.assertEqual(argv[:3], ["localectl", "set-locale", "--"])
+            self.assertIn("LANG=en_US.UTF-8", argv)
+            self.assertIn("LANGUAGE=de_DE:en_US", argv)
+            self.assertIn("LC_TIME=de_DE.UTF-8", argv)
+            self.assertIn("LC_MEASUREMENT=de_DE.UTF-8", argv)
+
+    def test_set_locale_refuses_write_on_invalid_existing_localectl_status(self):
+        bad_outputs = (
+            "System Locale: LANG=de_DE.UTF-8\n               LC_TIME=bad;value\n    VC Keymap: de\n",
+            "System Locale: LANG=de_DE.UTF-8\n               LANGUAGE=de_DE::en_US\n    VC Keymap: de\n",
+            "System Locale: LANG=de_DE.UTF-8\n               unparseable_continuation\n    VC Keymap: de\n",
+            "    VC Keymap: de\n   X11 Layout: de\n",
+        )
+        for bad_status in bad_outputs:
+            def fake_run(argv, status=bad_status, **_kw):
+                if argv == ["localectl", "list-locales"]:
+                    return core.Result(0, "C.UTF-8\nde_DE.UTF-8\nen_US.UTF-8\n")
+                if argv == ["localectl", "status"]:
+                    return core.Result(0, status)
+                return core.Result(0, "")
+
+            with (
+                mock.patch.object(tc.shutil, "which", side_effect=_which_map({"localectl": "/usr/bin/localectl"})),
+                mock.patch.object(core, "run", side_effect=fake_run) as run,
+            ):
+                ok, err = tc.set_locale(lang="en_US.UTF-8")
+                self.assertFalse(ok, repr(bad_status))
+                self.assertTrue(err)
+                for call in run.call_args_list:
+                    self.assertNotEqual(call[0][0][1], "set-locale")
 
     def test_set_ntp_timezone_and_locale_allowlists(self):
         def fake_run(argv, **_kw):

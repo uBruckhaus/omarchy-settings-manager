@@ -1,10 +1,12 @@
 """Settings Manager: Optimize and Time & Language backend (Mirrors, Network, Bluetooth, Time/Locale).
 
-Standard library only, no GTK, so it can be tested and used independently. Every external command
-runs through ``plugins_core.run`` (argument list, no shell, timeout and output cap). Configuration
-files are read with ``O_NONBLOCK`` + ``O_NOFOLLOW`` + ``S_ISREG`` + byte caps, and staged temp
-files for privileged ``install`` are written inside a private ``0700`` directory with ``O_NOFOLLOW``
-and fsync.
+Standard library only, no GTK, so it can be tested and used independently. Every blocking command
+runs through ``plugins_core.run`` (argument list, no shell, timeout and output cap); detached
+terminal launches run through ``launch()`` (fixed allowlisted argv, no shell, no inherited pipes,
+own session). Configuration files are read with ``O_NONBLOCK`` + ``O_NOFOLLOW`` + ``S_ISREG`` +
+byte caps, and privileged file updates stage into a private ``0700`` directory, install to a
+root-owned sibling temp file, verify byte-for-byte before atomic ``mv``, and remove the temp file
+on mismatch.
 """
 
 from __future__ import annotations
@@ -19,7 +21,9 @@ import shutil
 import socket
 import stat
 import struct
+import subprocess
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -33,8 +37,11 @@ PACMAN_DIR = Path("/etc/pacman.d")
 PACMAN_MIRRORLIST = PACMAN_DIR / "mirrorlist"
 PACMAN_CONF = Path("/etc/pacman.conf")
 
+SYSCTL_SYSTEM_DIR = Path("/usr/lib/sysctl.d")
 SYSCTL_DIR = Path("/etc/sysctl.d")
 SYSCTL_BBR_FILE = SYSCTL_DIR / "99-zz-settings-manager-network.conf"
+
+USR_BIN_DIR = Path("/usr/bin")
 
 PROC_SYS = Path("/proc/sys")
 LIB_MODULES = Path("/lib/modules")
@@ -51,13 +58,25 @@ BT_MAIN_CONF = Path("/etc/bluetooth/main.conf")
 # --- constants & allowlists ----------------------------------------------------------------------
 
 POLKIT_TIMEOUT = 120.0
-TERMINAL_TIMEOUT = 300.0
+LAUNCH_TIMEOUT = 2.0
 MAX_CONFIG_BYTES = 256 * 1024
 MAX_PROC_BYTES = 4096
 MAX_DNS_DGRAM_READS = 4
 
+# Omarchy's floating presentation wrapper with the command passed as positional args ("$@"), so
+# nothing in the command is ever parsed by a shell and the terminal stays open until key press.
+_TERMINAL_PRESENTATION = (
+    'source omarchy-restart-gum 2>/dev/null || true; '
+    'omarchy-show-logo 2>/dev/null || true; '
+    '"$@"; code=$?; '
+    'if (( code != 130 )); then omarchy-show-done "$code"; fi'
+)
+
 DNS_PROVIDERS = ("DHCP", "Cloudflare", "Google")
 DNS_ALL_PROVIDERS = ("DHCP", "Cloudflare", "Google", "Custom")
+
+_BBR_QDISCS = frozenset({"fq", "fq_codel"})
+_BBR_CONGESTION = frozenset({"bbr", "cubic"})
 
 DNS_TEST_RESOLVERS: tuple[tuple[str, str, str], ...] = (
     ("cloudflare", "Cloudflare", "1.1.1.1"),
@@ -93,8 +112,10 @@ _LOCALE_VAR_RE = re.compile(r"\A[A-Z][A-Z0-9_]{0,31}\Z")
 _OSRELEASE_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._+-]{0,127}\Z")
 _DOMAIN_LABEL_RE = re.compile(r"\A[A-Za-z0-9-]{1,63}\Z")
 _NM_POWERSAVE_RE = re.compile(r"^\s*wifi\.powersave\s*=\s*(\d)\s*$")
-_SYS_LOCALE_RE = re.compile(r"^\s*System Locale:\s*(.*)$")
+_SYS_LOCALE_RE = re.compile(r"^(\s*)System Locale:\s*(.*)$")
 _LOCALE_CONT_RE = re.compile(r"^\s+([A-Z][A-Z0-9_]*=.*)$")
+_LOCALECTL_HEADER_RE = re.compile(r"^\s*[A-Za-z][A-Za-z0-9 .-]*:\s")
+_RESOLVECTL_LABEL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9 .-]*:\s")
 _SKIP_NM_TYPES = frozenset({"loopback", "bridge", "tun", "tap", "veth", "dummy", "wireguard"})
 
 
@@ -120,6 +141,22 @@ def valid_timezone(value) -> bool:
 
 def valid_locale(value) -> bool:
     return isinstance(value, str) and bool(_LOCALE_RE.match(value))
+
+
+def valid_language_list(value) -> bool:
+    """Validate GNU gettext ``LANGUAGE`` (colon-separated list of locale/language tags)."""
+    if not isinstance(value, str) or not value or len(value) > 256:
+        return False
+    parts = value.split(":")
+    return bool(parts) and all(valid_locale(part) for part in parts)
+
+
+def _valid_locale_var(name: str) -> bool:
+    return (
+        isinstance(name, str)
+        and bool(_LOCALE_VAR_RE.match(name))
+        and (name in ("LANG", "LANGUAGE") or name.startswith("LC_"))
+    )
 
 
 def _valid_ip(value: str) -> bool:
@@ -154,8 +191,8 @@ def _err_text(result: core.Result, *, pkexec: bool = False) -> str:
     return f"exit {result.code}"
 
 
-def _read_text_file(path: Path, max_bytes: int = MAX_CONFIG_BYTES, *, nofollow: bool = True) -> str | None:
-    """Read a regular file safely with O_NONBLOCK, O_NOFOLLOW, S_ISREG check, and a hard byte cap."""
+def _read_bytes_file(path: Path, max_bytes: int = MAX_CONFIG_BYTES, *, nofollow: bool = True) -> bytes | None:
+    """Read a regular file as raw bytes with O_NONBLOCK, O_NOFOLLOW, S_ISREG, and a hard cap."""
     flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK
     if nofollow:
         flags |= os.O_NOFOLLOW
@@ -178,6 +215,25 @@ def _read_text_file(path: Path, max_bytes: int = MAX_CONFIG_BYTES, *, nofollow: 
         return None
     if len(data) > max_bytes:
         return None
+    return data
+
+
+def _read_text_file(
+    path: Path,
+    max_bytes: int = MAX_CONFIG_BYTES,
+    *,
+    nofollow: bool = True,
+    strict_utf8: bool = False,
+) -> str | None:
+    """Read a regular file safely as UTF-8 (lossy by default, or strict when ``strict_utf8=True``)."""
+    data = _read_bytes_file(path, max_bytes, nofollow=nofollow)
+    if data is None:
+        return None
+    if strict_utf8:
+        try:
+            return data.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
     return data.decode("utf-8", "replace")
 
 
@@ -186,6 +242,70 @@ def _path_is_symlink(path: Path) -> bool:
         return stat.S_ISLNK(os.lstat(path).st_mode)
     except OSError:
         return False
+
+
+def _resolve_usr_bin(name: str) -> str | None:
+    """Resolve ``name`` strictly to a binary inside ``/usr/bin`` (refuses user-writable PATH entries)."""
+    if not isinstance(name, str) or not name or "/" in name or name in (".", ".."):
+        return None
+    found = shutil.which(name)
+    if not found:
+        return None
+    real = os.path.realpath(found)
+    usr_bin_real = os.path.realpath(str(USR_BIN_DIR))
+    if os.path.dirname(real) != usr_bin_real:
+        return None
+    return real
+
+
+def launch(argv: list[str], timeout: float = LAUNCH_TIMEOUT) -> tuple[bool, str]:
+    """Start a program that opens its own window (e.g. a floating terminal) detached and return.
+
+    Fixed argv, no shell, no inherited pipes, own session; a process still running after
+    ``timeout`` is normal (its window is open) and is reaped on a daemon thread.
+    """
+    if not argv or not argv[0] or not all(isinstance(a, str) and "\x00" not in a for a in argv):
+        return False, "invalid command"
+    program = argv[0] if os.path.isabs(argv[0]) else shutil.which(argv[0])
+    if program is None:
+        return False, f"{argv[0]}: not found"
+    try:
+        proc = subprocess.Popen(
+            [program, *argv[1:]],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+    except OSError as exc:
+        return False, str(exc)
+    try:
+        code = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        threading.Thread(target=proc.wait, daemon=True).start()
+        return True, ""
+    return (True, "") if code == 0 else (False, f"exit {code}")
+
+
+def _terminal_argv(command: list[str]) -> list[str] | None:
+    """Build a floating Omarchy presentation terminal argv that keeps output visible until key press."""
+    if not command or not all(isinstance(part, str) and part and "\x00" not in part for part in command):
+        return None
+    inner = [
+        "xdg-terminal-exec",
+        "--app-id=org.omarchy.terminal",
+        "--title=Omarchy",
+        "-e",
+        "bash",
+        "-c",
+        _TERMINAL_PRESENTATION,
+        "settings-manager",
+        *command,
+    ]
+    if shutil.which("uwsm-app"):
+        return ["uwsm-app", "-t", "service", "--", *inner]
+    return inner
 
 
 @contextlib.contextmanager
@@ -212,6 +332,58 @@ def _staged_file(filename: str, content: str, mode: int = 0o644):
                     pass
             raise
         yield target
+
+
+def _install_verified_root_file(
+    target: Path,
+    content: str,
+    *,
+    create_dir: bool = False,
+) -> tuple[bool, str]:
+    """Atomically install ``content`` to root-owned ``target`` with read-back verification.
+
+    Installs into a sibling ``.<name>.sm-tmp`` path first, reads the root-owned file back with
+    ``O_NOFOLLOW`` and compares byte-for-byte with ``content`` (removing the temp file on mismatch
+    so a staged-file swap race can never reach ``target``), then atomically ``mv``s it into place.
+    """
+    tmp_root = target.parent / f".{target.name}.sm-tmp"
+    if _path_is_symlink(target.parent) or _path_is_symlink(target) or _path_is_symlink(tmp_root):
+        return False, "Refusing to write through a symlink."
+    for check_path in (target, tmp_root):
+        try:
+            st = os.lstat(check_path)
+        except FileNotFoundError:
+            st = None
+        except OSError:
+            return False, f"Could not inspect {check_path}."
+        if st is not None and not stat.S_ISREG(st.st_mode):
+            return False, "Refusing to overwrite non-regular file."
+
+    expected_bytes = content.encode("utf-8")
+    if len(expected_bytes) > MAX_CONFIG_BYTES:
+        return False, "Configuration file is too large."
+
+    with _staged_file(target.name, content, mode=0o644) as staged_path:
+        install_argv = ["pkexec", "/usr/bin/install"]
+        if create_dir:
+            install_argv.append("-D")
+        install_argv.extend(["-m", "0644", "-o", "0", "-g", "0", "--", str(staged_path), str(tmp_root)])
+        install_res = core.run(install_argv, timeout=POLKIT_TIMEOUT)
+        if not install_res.ok:
+            return False, _err_text(install_res, pkexec=True)
+
+    actual = _read_bytes_file(tmp_root, MAX_CONFIG_BYTES, nofollow=True)
+    if actual is None or actual != expected_bytes:
+        core.run(["pkexec", "/usr/bin/rm", "-f", "--", str(tmp_root)], timeout=POLKIT_TIMEOUT)
+        return False, "Verification failed: installed file did not match expected content."
+
+    mv_res = core.run(
+        ["pkexec", "/usr/bin/mv", "-f", "--", str(tmp_root), str(target)],
+        timeout=POLKIT_TIMEOUT,
+    )
+    if not mv_res.ok:
+        return False, _err_text(mv_res, pkexec=True)
+    return True, ""
 
 
 def _parse_nmcli_terse(line: str) -> list[str]:
@@ -340,13 +512,13 @@ def read_mirrors() -> dict:
 
     rank_tool: str | None = None
     if not omarchy_managed:
-        if shutil.which("rate-mirrors"):
+        if _resolve_usr_bin("rate-mirrors"):
             rank_tool = "rate-mirrors"
-        elif shutil.which("reflector"):
+        elif _resolve_usr_bin("reflector"):
             rank_tool = "reflector"
 
     has_terminal = shutil.which("xdg-terminal-exec") is not None
-    has_pkexec = shutil.which("pkexec") is not None
+    has_pkexec = _resolve_usr_bin("pkexec") is not None
 
     return {
         "ok": True,
@@ -371,51 +543,69 @@ def read_mirrors() -> dict:
 
 
 def rank_mirrors_in_terminal() -> tuple[bool, str]:
-    """Run mirror ranking in a visible terminal (refused when Omarchy pins its own mirrors)."""
+    """Launch mirror ranking detached in a visible Omarchy terminal (refused when Omarchy pins mirrors)."""
     info = read_mirrors()
     if info.get("omarchy_managed"):
         return False, "Omarchy manages its own pacman mirrors; ranking is disabled."
     tool = info.get("rank_tool")
     if tool not in ("rate-mirrors", "reflector"):
-        return False, "Neither rate-mirrors nor reflector is installed."
+        return False, "Neither rate-mirrors nor reflector is installed under /usr/bin."
+    tool_path = _resolve_usr_bin(tool)
+    if tool_path is None:
+        return False, f"Refusing to run {tool} outside /usr/bin."
+    pkexec_path = _resolve_usr_bin("pkexec")
+    if pkexec_path is None:
+        return False, "pkexec is missing under /usr/bin."
     if not shutil.which("xdg-terminal-exec"):
         return False, "xdg-terminal-exec is missing."
-    if not shutil.which("pkexec"):
-        return False, "pkexec is missing."
 
     if tool == "rate-mirrors":
-        argv = [
-            "xdg-terminal-exec", "--",
-            "pkexec", "env",
+        env_path = _resolve_usr_bin("env") or "/usr/bin/env"
+        cmd = [
+            pkexec_path,
+            env_path,
             "RATE_MIRRORS_ALLOW_ROOT=true",
             "RATE_MIRRORS_PROTOCOL=https",
-            "rate-mirrors", "--save", str(PACMAN_MIRRORLIST), "arch",
+            tool_path,
+            "--save",
+            str(PACMAN_MIRRORLIST),
+            "arch",
         ]
     else:
-        argv = [
-            "xdg-terminal-exec", "--",
-            "pkexec", "reflector",
-            "--verbose", "--protocol", "https",
-            "--latest", "30", "--number", "20", "--sort", "rate",
-            "--save", str(PACMAN_MIRRORLIST),
+        cmd = [
+            pkexec_path,
+            tool_path,
+            "--verbose",
+            "--protocol",
+            "https",
+            "--latest",
+            "30",
+            "--number",
+            "20",
+            "--sort",
+            "rate",
+            "--save",
+            str(PACMAN_MIRRORLIST),
         ]
-    res = core.run(argv, timeout=TERMINAL_TIMEOUT)
-    if not res.ok:
-        return False, _err_text(res, pkexec=True)
-    return True, ""
+    argv = _terminal_argv(cmd)
+    if argv is None:
+        return False, "Invalid mirror ranking command."
+    return launch(argv)
 
 
 # --- 2. Network tuning (DNS, DNS latency test, TCP BBR, Wi-Fi power saving) ----------------------
 
-def _active_nm_connection() -> dict | None:
+def _active_nm_connections() -> list[dict]:
+    """Return all active non-skipped NetworkManager connections."""
     if not shutil.which("nmcli"):
-        return None
+        return []
     res = core.run(
         ["nmcli", "-t", "-f", "NAME,UUID,TYPE,DEVICE", "connection", "show", "--active"],
         timeout=10.0,
     )
     if not res.ok:
-        return None
+        return []
+    conns: list[dict] = []
     for raw in res.out.splitlines():
         fields = _parse_nmcli_terse(raw)
         if len(fields) < 4:
@@ -425,13 +615,58 @@ def _active_nm_connection() -> dict | None:
             continue
         if not valid_uuid(uuid) or not valid_iface(device):
             continue
-        return {
+        conns.append({
             "name": _clean_text(name, 128),
             "uuid": uuid,
             "type": _clean_text(conn_type, 64),
             "device": device,
-        }
+        })
+    return conns
+
+
+def _default_route_device() -> str | None:
+    """Return the interface name carrying the default route (IPv4 first, then IPv6), or None."""
+    if not shutil.which("ip"):
+        return None
+    for argv in (["ip", "route", "show", "default"], ["ip", "-6", "route", "show", "default"]):
+        res = core.run(argv, timeout=5.0)
+        if not res.ok:
+            continue
+        for line in res.out.splitlines():
+            tokens = line.split()
+            for idx, tok in enumerate(tokens):
+                if tok == "dev" and idx + 1 < len(tokens):
+                    dev = tokens[idx + 1]
+                    if valid_iface(dev):
+                        return dev
     return None
+
+
+def _default_nm_connection(conns: list[dict] | None = None) -> dict | None:
+    """Return the active connection on the default-route device, else the first active connection."""
+    active_list = _active_nm_connections() if conns is None else conns
+    if not active_list:
+        return None
+    if len(active_list) > 1:
+        default_dev = _default_route_device()
+        if default_dev:
+            for conn in active_list:
+                if conn["device"] == default_dev:
+                    return conn
+    return active_list[0]
+
+
+def _active_wifi_connection(conns: list[dict] | None = None) -> dict | None:
+    """Return the first active ``802-11-wireless`` connection (even when Ethernet is listed first)."""
+    active_list = _active_nm_connections() if conns is None else conns
+    for conn in active_list:
+        if conn["type"] == "802-11-wireless":
+            return conn
+    return None
+
+
+def _active_nm_connection() -> dict | None:
+    return _default_nm_connection()
 
 
 def _global_wifi_powersave_on() -> bool:
@@ -493,8 +728,13 @@ def _read_active_dns_ips(active: dict | None) -> list[str]:
         res = core.run(["resolvectl", "status"], timeout=10.0)
         if res.ok:
             in_servers = False
+            server_indent = 0
             for line in res.out.splitlines():
                 stripped = line.strip()
+                if not stripped:
+                    in_servers = False
+                    continue
+                indent = len(line) - len(line.lstrip(" \t"))
                 if stripped.startswith("Current DNS Server:"):
                     _add(stripped.split(":", 1)[1])
                     in_servers = False
@@ -502,7 +742,8 @@ def _read_active_dns_ips(active: dict | None) -> list[str]:
                     for token in stripped.split(":", 1)[1].split():
                         _add(token)
                     in_servers = True
-                elif in_servers and line.startswith((" ", "\t")) and ":" not in stripped:
+                    server_indent = indent
+                elif in_servers and indent > server_indent and not _RESOLVECTL_LABEL_RE.match(stripped):
                     for token in stripped.split():
                         _add(token)
                 else:
@@ -576,7 +817,9 @@ def _bbr_available() -> bool:
 
 def read_network_tune() -> dict:
     """Read DNS provider, active DNS servers, TCP congestion/qdisc, and Wi-Fi power saving."""
-    active = _active_nm_connection()
+    conns = _active_nm_connections()
+    active = _default_nm_connection(conns)
+    wifi_conn = _active_wifi_connection(conns)
     has_omarchy = shutil.which("omarchy") is not None
     provider = ""
     if has_omarchy:
@@ -591,9 +834,9 @@ def read_network_tune() -> dict:
     current_ips = _read_active_dns_ips(active)
 
     wifi: dict | None = None
-    if active and active["type"] == "802-11-wireless" and shutil.which("nmcli"):
+    if wifi_conn and shutil.which("nmcli"):
         ps_res = core.run(
-            ["nmcli", "-t", "-g", "802-11-wireless.powersave", "connection", "show", "uuid", active["uuid"]],
+            ["nmcli", "-t", "-g", "802-11-wireless.powersave", "connection", "show", "uuid", wifi_conn["uuid"]],
             timeout=10.0,
         )
         raw_ps = _clean_text(ps_res.out.strip(), 32) if ps_res.ok else ""
@@ -605,9 +848,9 @@ def read_network_tune() -> dict:
             ps_on = _global_wifi_powersave_on()
         wifi = {
             "backend": "nmcli",
-            "device": active["device"],
-            "connection": active["name"],
-            "uuid": active["uuid"],
+            "device": wifi_conn["device"],
+            "connection": wifi_conn["name"],
+            "uuid": wifi_conn["uuid"],
             "powersave": ps_on,
             "raw": raw_ps or "default",
         }
@@ -650,15 +893,15 @@ def set_dns_provider(provider: str) -> tuple[bool, str]:
 
 
 def open_custom_dns_terminal() -> tuple[bool, str]:
-    """Open a visible terminal for interactive ``omarchy dns Custom``."""
+    """Launch ``omarchy dns Custom`` detached in a visible Omarchy presentation terminal."""
     if not shutil.which("omarchy"):
         return False, "omarchy is missing."
     if not shutil.which("xdg-terminal-exec"):
         return False, "xdg-terminal-exec is missing."
-    res = core.run(["xdg-terminal-exec", "--", "omarchy", "dns", "Custom"], timeout=TERMINAL_TIMEOUT)
-    if not res.ok:
-        return False, _err_text(res)
-    return True, ""
+    argv = _terminal_argv(["omarchy", "dns", "Custom"])
+    if argv is None:
+        return False, "Invalid terminal command."
+    return launch(argv)
 
 
 def _build_dns_query(domain: str, txid: int) -> bytes:
@@ -752,66 +995,125 @@ def test_dns_latency(current_server: str | None = None) -> dict:
     return {"ok": True, "results": results}
 
 
+def _other_sysctl_sets_bbr() -> bool:
+    """Return True when sysctl.d files other than ``SYSCTL_BBR_FILE`` already configure BBR + fq."""
+    by_name: dict[str, Path] = {}
+    for directory in (SYSCTL_SYSTEM_DIR, SYSCTL_DIR):
+        if not directory.is_dir() or _path_is_symlink(directory):
+            continue
+        try:
+            entries = sorted(directory.iterdir(), key=lambda p: p.name)
+        except OSError:
+            continue
+        for entry in entries:
+            if not entry.name.endswith(".conf"):
+                continue
+            if directory == SYSCTL_DIR and entry.name == SYSCTL_BBR_FILE.name:
+                continue
+            by_name[entry.name] = entry
+
+    cc = ""
+    qdisc = ""
+    for name in sorted(by_name):
+        text = _read_text_file(by_name[name], MAX_CONFIG_BYTES, nofollow=True)
+        if text is None:
+            continue
+        for raw in text.splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or line.startswith(";"):
+                continue
+            if "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            key = k.strip().lstrip("-").replace("/", ".")
+            val = v.strip()
+            if key == "net.ipv4.tcp_congestion_control":
+                cc = val
+            elif key == "net.core.default_qdisc":
+                qdisc = val
+    return cc == "bbr" and qdisc == "fq"
+
+
 def set_bbr(enable: bool) -> tuple[bool, str]:
-    """Enable or disable TCP BBR via a sysctl drop-in installed with fixed-argv pkexec."""
+    """Enable or disable TCP BBR via verified atomic sysctl drop-in + runtime ``sysctl -w``.
+
+    When enabling on a system whose other sysctl.d files (e.g. Omarchy's ``99-omarchy-sysctl.conf``)
+    already enable BBR + fq, removes our drop-in instead of keeping a duplicate pin. Runtime values
+    are always applied with fixed allowlisted ``sysctl -w`` arguments (never ``sysctl -p`` on a file).
+    Returns ``(True, "reboot")`` if the persistent file changed but the runtime apply was cancelled.
+    """
     if not isinstance(enable, bool):
         return False, "Invalid BBR setting."
     if not shutil.which("pkexec"):
         return False, "pkexec is missing."
     if _path_is_symlink(SYSCTL_DIR) or _path_is_symlink(SYSCTL_BBR_FILE):
         return False, "Refusing to write through a symlink."
-    try:
-        st = os.lstat(SYSCTL_BBR_FILE)
-    except FileNotFoundError:
-        st = None
-    except OSError:
-        return False, "Could not inspect target sysctl drop-in."
-    if st is not None and not stat.S_ISREG(st.st_mode):
-        return False, "Refusing to overwrite non-regular file."
 
-    if enable:
-        content = (
-            "# Managed by Settings Manager (Optimize -> Network)\n"
-            "net.core.default_qdisc = fq\n"
-            "net.ipv4.tcp_congestion_control = bbr\n"
-        )
+    qdisc = "fq" if enable else "fq_codel"
+    cc = "bbr" if enable else "cubic"
+    if qdisc not in _BBR_QDISCS or cc not in _BBR_CONGESTION:
+        return False, "Invalid BBR setting."
+
+    persisted_changed = False
+    if enable and _other_sysctl_sets_bbr():
+        try:
+            st = os.lstat(SYSCTL_BBR_FILE)
+        except FileNotFoundError:
+            st = None
+        except OSError:
+            return False, "Could not inspect target sysctl drop-in."
+        if st is not None:
+            if not stat.S_ISREG(st.st_mode):
+                return False, "Refusing to remove non-regular file."
+            rm_res = core.run(
+                ["pkexec", "/usr/bin/rm", "-f", "--", str(SYSCTL_BBR_FILE)],
+                timeout=POLKIT_TIMEOUT,
+            )
+            if not rm_res.ok:
+                return False, _err_text(rm_res, pkexec=True)
+            persisted_changed = True
     else:
         content = (
             "# Managed by Settings Manager (Optimize -> Network)\n"
-            "net.core.default_qdisc = fq_codel\n"
-            "net.ipv4.tcp_congestion_control = cubic\n"
+            f"net.core.default_qdisc = {qdisc}\n"
+            f"net.ipv4.tcp_congestion_control = {cc}\n"
         )
-
-    with _staged_file(SYSCTL_BBR_FILE.name, content, mode=0o644) as tmp_path:
-        install_res = core.run(
-            [
-                "pkexec", "/usr/bin/install",
-                "-D", "-m", "0644", "-o", "0", "-g", "0",
-                "--", str(tmp_path), str(SYSCTL_BBR_FILE),
-            ],
-            timeout=POLKIT_TIMEOUT,
-        )
-        if not install_res.ok:
-            return False, _err_text(install_res, pkexec=True)
+        ok, err = _install_verified_root_file(SYSCTL_BBR_FILE, content, create_dir=True)
+        if not ok:
+            return False, err
+        persisted_changed = True
 
     apply_res = core.run(
-        ["pkexec", "/usr/bin/sysctl", "-q", "-p", str(SYSCTL_BBR_FILE)],
+        [
+            "pkexec",
+            "/usr/bin/sysctl",
+            "-q",
+            "-w",
+            f"net.core.default_qdisc={qdisc}",
+            f"net.ipv4.tcp_congestion_control={cc}",
+        ],
         timeout=POLKIT_TIMEOUT,
     )
     if not apply_res.ok:
+        if persisted_changed:
+            return True, "reboot"
         return False, _err_text(apply_res, pkexec=True)
     return True, ""
 
 
 def set_wifi_powersave(enable: bool) -> tuple[bool, str]:
-    """Set NetworkManager Wi-Fi power saving (3=on, 2=off) for the active Wi-Fi connection."""
+    """Set NetworkManager Wi-Fi power saving (3=on, 2=off) for the active Wi-Fi connection.
+
+    Returns ``(True, "reconnect")`` when the profile was saved but ``nmcli device reapply``
+    could not apply ``802-11-wireless.powersave`` live (takes effect on next reconnect).
+    """
     if not isinstance(enable, bool):
         return False, "Invalid Wi-Fi power saving setting."
-    active = _active_nm_connection()
-    if not active or active.get("type") != "802-11-wireless":
+    wifi_conn = _active_wifi_connection()
+    if not wifi_conn:
         return False, "No active Wi-Fi connection."
-    uuid = active["uuid"]
-    device = active["device"]
+    uuid = wifi_conn["uuid"]
+    device = wifi_conn["device"]
     if not valid_uuid(uuid) or not valid_iface(device):
         return False, "Invalid network connection identifier."
 
@@ -827,7 +1129,7 @@ def set_wifi_powersave(enable: bool) -> tuple[bool, str]:
 
     reapply_res = core.run(["nmcli", "device", "reapply", device], timeout=30.0)
     if not reapply_res.ok:
-        return False, _err_text(reapply_res)
+        return True, "reconnect"
     return True, ""
 
 
@@ -953,26 +1255,22 @@ def set_bluetooth_option(key: str, value) -> tuple[bool, str]:
             return False, "Value out of range."
         text_val = str(value)
 
-    if _path_is_symlink(BT_MAIN_CONF):
+    if _path_is_symlink(BT_MAIN_CONF.parent) or _path_is_symlink(BT_MAIN_CONF):
         return False, "Refusing to write through a symlink."
-    current = _read_text_file(BT_MAIN_CONF, MAX_CONFIG_BYTES, nofollow=True)
-    if current is None:
+    raw = _read_bytes_file(BT_MAIN_CONF, MAX_CONFIG_BYTES, nofollow=True)
+    if raw is None:
         return False, f"{BT_MAIN_CONF} is missing or unreadable."
+    try:
+        current = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return False, f"{BT_MAIN_CONF} is not valid UTF-8; refusing to overwrite."
     if not shutil.which("pkexec"):
         return False, "pkexec is missing."
 
     updated = update_bluetooth_conf(current, section, key, text_val)
-    with _staged_file(BT_MAIN_CONF.name, updated, mode=0o644) as tmp_path:
-        install_res = core.run(
-            [
-                "pkexec", "/usr/bin/install",
-                "-m", "0644", "-o", "0", "-g", "0",
-                "--", str(tmp_path), str(BT_MAIN_CONF),
-            ],
-            timeout=POLKIT_TIMEOUT,
-        )
-        if not install_res.ok:
-            return False, _err_text(install_res, pkexec=True)
+    ok, err = _install_verified_root_file(BT_MAIN_CONF, updated, create_dir=False)
+    if not ok:
+        return False, err
 
     if shutil.which("systemctl"):
         restart_res = core.run(
@@ -986,28 +1284,76 @@ def set_bluetooth_option(key: str, value) -> tuple[bool, str]:
 
 # --- 4. Time & Language (timedatectl / localectl) ------------------------------------------------
 
-def parse_localectl_status(text: str) -> dict[str, str]:
-    """Extract the ``System Locale:`` KEY=VALUE pairs from ``localectl status`` output."""
+def parse_localectl_status_strict(text: str) -> tuple[bool, dict[str, str], str]:
+    """Parse ``System Locale:`` KEY=VALUE pairs from ``localectl status``, flagging invalid lines.
+
+    Continuation lines are detected by indentation (not by excluding ``:``), so ``LANGUAGE`` colon
+    lists and all following ``LC_*`` variables survive intact. Returns ``(ok, vars, error)``;
+    ``ok`` is False when ``System Locale:`` is missing or any line under it fails validation.
+    """
     out: dict[str, str] = {}
+    found_section = False
     in_locale = False
+    val_col = 0
+    invalid: list[str] = []
+
+    def _consume(kv: str) -> None:
+        if "=" not in kv:
+            invalid.append(_clean_text(kv, 64) or "entry")
+            return
+        k, v = kv.split("=", 1)
+        k = k.strip()
+        v = v.strip()
+        if not _valid_locale_var(k):
+            invalid.append(_clean_text(k, 64) or "key")
+            return
+        if k == "LANGUAGE":
+            if not valid_language_list(v):
+                invalid.append(k)
+                return
+        elif not valid_locale(v):
+            invalid.append(k)
+            return
+        out[k] = v
+
     for raw in text.splitlines():
-        kv = ""
         m = _SYS_LOCALE_RE.match(raw)
         if m:
+            found_section = True
             in_locale = True
-            kv = m.group(1).strip()
-        elif in_locale:
+            val_col = raw.index(":") + 1
+            kv = m.group(2).strip()
+            if kv and kv not in ("n/a", "(unset)"):
+                _consume(kv)
+            continue
+        if in_locale:
+            stripped = raw.strip()
+            if not stripped:
+                in_locale = False
+                continue
+            indent = len(raw) - len(raw.lstrip(" \t"))
             cm = _LOCALE_CONT_RE.match(raw)
-            if cm and ":" not in raw:
-                kv = cm.group(1).strip()
+            if cm:
+                _consume(cm.group(1).strip())
+            elif indent >= val_col and not _LOCALECTL_HEADER_RE.match(raw):
+                _consume(stripped)
             else:
                 in_locale = False
-        if kv and "=" in kv:
-            k, v = kv.split("=", 1)
-            k = k.strip()
-            v = v.strip()
-            if _LOCALE_VAR_RE.match(k) and valid_locale(v):
-                out[k] = v
+
+    if not found_section:
+        return False, out, "Could not find System Locale in localectl status."
+    if invalid:
+        return (
+            False,
+            out,
+            f"Could not validate existing system locale ({', '.join(invalid[:4])}); refusing to overwrite.",
+        )
+    return True, out, ""
+
+
+def parse_localectl_status(text: str) -> dict[str, str]:
+    """Extract valid ``System Locale:`` KEY=VALUE pairs from ``localectl status`` output."""
+    _ok, out, _err = parse_localectl_status_strict(text)
     return out
 
 
@@ -1152,7 +1498,9 @@ def set_locale(lang: str | None = None, formats: str | None = None) -> tuple[boo
     st_res = core.run(["localectl", "status"], timeout=10.0)
     if not st_res.ok:
         return False, _err_text(st_res)
-    loc_vars = parse_localectl_status(st_res.out)
+    parsed_ok, loc_vars, parse_err = parse_localectl_status_strict(st_res.out)
+    if not parsed_ok:
+        return False, parse_err
 
     if lang is not None:
         loc_vars["LANG"] = lang

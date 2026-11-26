@@ -99,6 +99,32 @@ class TunePages(PageGroup):
         self._dns_test_btn: Gtk.Button | None = None
         self._dns_test_spinner: Gtk.Spinner | None = None
         self._dns_current_ip: str | None = None
+        self._action_busy: bool = False
+        self._mutating_widgets: dict[str, list[Gtk.Widget]] = {"optimize": [], "time": []}
+
+    def _register_mutating(self, page_key: str, widget: Gtk.Widget) -> None:
+        self._mutating_widgets.setdefault(page_key, []).append(widget)
+        if self._action_busy:
+            widget.set_sensitive(False)
+
+    def _run_privileged(self, page_key: str, busy_text: str, worker, on_done, on_busy=None) -> bool:
+        """Run one privileged mutation at a time, disabling mutating rows until reload completes."""
+        if self._action_busy or getattr(self.app, "busy", False):
+            self.app.toast(_("Wait until the running task is done."))
+            if on_busy is not None:
+                on_busy()
+            return False
+        self._action_busy = True
+        for widget in self._mutating_widgets.get(page_key, ()):
+            widget.set_sensitive(False)
+
+        def _after(res) -> None:
+            self._action_busy = False
+            on_done(res)
+            self.refresh(page_key)
+
+        run_async(self.app, worker, _after, busy_text=busy_text)
+        return True
 
     def description(self, key: str) -> str:
         if key == "optimize":
@@ -136,6 +162,7 @@ class TunePages(PageGroup):
             if not self.current("optimize", gen):
                 return
             clear(box)
+            self._mutating_widgets["optimize"] = []
             if not isinstance(data, dict) or not data.get("ok"):
                 err = data.get("error") if isinstance(data, dict) else ""
                 box.append(_note_group(_("Optimize"), _("Could not load optimization settings."), str(err or "")))
@@ -229,7 +256,7 @@ class TunePages(PageGroup):
                     ),
                 )
                 btn = Gtk.Button(label=_("Rank in terminal…"), valign=Gtk.Align.CENTER)
-                btn.connect("clicked", lambda *_, t=str(rank_tool): self._confirm_rank_mirrors(t))
+                btn.connect("clicked", lambda b, t=str(rank_tool): self._confirm_rank_mirrors(t, b))
                 rank_row.add_suffix(btn)
                 group.add(rank_row)
             elif not rank_tool:
@@ -242,7 +269,7 @@ class TunePages(PageGroup):
 
         return group
 
-    def _confirm_rank_mirrors(self, tool: str) -> None:
+    def _confirm_rank_mirrors(self, tool: str, trigger_btn: Gtk.Button) -> None:
         dialog = Adw.AlertDialog(
             heading=_("Rank mirrors in a terminal?"),
             body=_(
@@ -258,21 +285,17 @@ class TunePages(PageGroup):
         def _on_response(_dlg, response: str) -> None:
             if response != "rank":
                 return
+            trigger_btn.set_sensitive(False)
 
             def _after(res) -> None:
+                trigger_btn.set_sensitive(True)
                 ok, err = _unpack_result(res)
                 if ok:
-                    self.app.toast(_("Mirror ranking finished."))
+                    self.app.toast(_("Mirror ranking opened in a terminal."))
                 else:
                     self.app.toast(err or _("Could not run mirror ranking."))
-                self.refresh("optimize")
 
-            run_async(
-                self.app,
-                tc.rank_mirrors_in_terminal,
-                _after,
-                busy_text=_("Running mirror ranker in terminal…"),
-            )
+            run_async(self.app, tc.rank_mirrors_in_terminal, _after)
 
         dialog.connect("response", _on_response)
         dialog.present(self.app.window)
@@ -319,7 +342,8 @@ class TunePages(PageGroup):
             subtitle=dns_sub,
         )
         dns_row.set_sensitive(bool(dns.get("can_set")))
-        dns_state = {"current": provider, "syncing": False}
+        self._register_mutating("optimize", dns_row)
+        dns_state = {"current": provider, "idx": selected_idx, "syncing": False}
 
         def _on_dns_selected(row: Adw.ComboRow, _pspec) -> None:
             if dns_state["syncing"]:
@@ -331,19 +355,24 @@ class TunePages(PageGroup):
             if chosen == dns_state["current"] or chosen == "Custom":
                 return
 
+            def _revert() -> None:
+                dns_state["syncing"] = True
+                row.set_selected(dns_state["idx"])
+                dns_state["syncing"] = False
+
             def _after(res) -> None:
                 ok, err = _unpack_result(res)
                 if ok:
                     self.app.toast(_("DNS provider set to {0}.").format(dns_choices[idx][1]))
                 else:
                     self.app.toast(err or _("Could not change DNS provider."))
-                self.refresh("optimize")
 
-            run_async(
-                self.app,
+            self._run_privileged(
+                "optimize",
+                _("Updating DNS provider…"),
                 lambda p=chosen: tc.set_dns_provider(p),
                 _after,
-                busy_text=_("Updating DNS provider…"),
+                on_busy=_revert,
             )
 
         dns_row.connect("notify::selected", _on_dns_selected)
@@ -356,7 +385,7 @@ class TunePages(PageGroup):
                 subtitle=escape(_("Opens omarchy dns Custom in a terminal to enter your own DNS servers.")),
             )
             custom_btn = Gtk.Button(label=_("Configure…"), valign=Gtk.Align.CENTER)
-            custom_btn.connect("clicked", lambda *_: self._run_custom_dns())
+            custom_btn.connect("clicked", lambda b: self._run_custom_dns(b))
             custom_row.add_suffix(custom_btn)
             group.add(custom_row)
 
@@ -394,6 +423,7 @@ class TunePages(PageGroup):
             active=bbr_on,
             sensitive=bool(bbr_avail and has_pkexec),
         )
+        self._register_mutating("optimize", bbr_row)
         bbr_state = {"current": bbr_on, "syncing": False}
 
         def _on_bbr_toggled(row: Adw.SwitchRow, _pspec) -> None:
@@ -403,19 +433,27 @@ class TunePages(PageGroup):
             if want == bbr_state["current"]:
                 return
 
-            def _after(res) -> None:
-                ok, err = _unpack_result(res)
-                if ok:
-                    self.app.toast(_("TCP BBR enabled.") if want else _("TCP BBR disabled."))
-                else:
-                    self.app.toast(err or _("Could not update TCP congestion control."))
-                self.refresh("optimize")
+            def _revert() -> None:
+                bbr_state["syncing"] = True
+                row.set_active(bbr_state["current"])
+                bbr_state["syncing"] = False
 
-            run_async(
-                self.app,
+            def _after(res) -> None:
+                ok, msg = _unpack_result(res)
+                if ok:
+                    if msg == "reboot":
+                        self.app.toast(_("TCP BBR setting saved; takes effect after restart."))
+                    else:
+                        self.app.toast(_("TCP BBR enabled.") if want else _("TCP BBR disabled."))
+                else:
+                    self.app.toast(msg or _("Could not update TCP congestion control."))
+
+            self._run_privileged(
+                "optimize",
+                _("Updating TCP congestion control…"),
                 lambda v=want: tc.set_bbr(v),
                 _after,
-                busy_text=_("Updating TCP congestion control…"),
+                on_busy=_revert,
             )
 
         bbr_row.connect("notify::active", _on_bbr_toggled)
@@ -429,6 +467,7 @@ class TunePages(PageGroup):
                 subtitle=escape(_("Off: lower latency and fewer drop-outs, slightly more battery use.")),
                 active=ps_on,
             )
+            self._register_mutating("optimize", ps_row)
             ps_state = {"current": ps_on, "syncing": False}
 
             def _on_ps_toggled(row: Adw.SwitchRow, _pspec) -> None:
@@ -438,21 +477,33 @@ class TunePages(PageGroup):
                 if want == ps_state["current"]:
                     return
 
-                def _after(res) -> None:
-                    ok, err = _unpack_result(res)
-                    if ok:
-                        self.app.toast(
-                            _("Wi-Fi power saving enabled.") if want else _("Wi-Fi power saving disabled.")
-                        )
-                    else:
-                        self.app.toast(err or _("Could not update Wi-Fi power saving."))
-                    self.refresh("optimize")
+                def _revert() -> None:
+                    ps_state["syncing"] = True
+                    row.set_active(ps_state["current"])
+                    ps_state["syncing"] = False
 
-                run_async(
-                    self.app,
+                def _after(res) -> None:
+                    ok, msg = _unpack_result(res)
+                    if ok:
+                        if msg == "reconnect":
+                            self.app.toast(
+                                _("Wi-Fi power saving enabled; takes effect on reconnect.")
+                                if want
+                                else _("Wi-Fi power saving disabled; takes effect on reconnect.")
+                            )
+                        else:
+                            self.app.toast(
+                                _("Wi-Fi power saving enabled.") if want else _("Wi-Fi power saving disabled.")
+                            )
+                    else:
+                        self.app.toast(msg or _("Could not update Wi-Fi power saving."))
+
+                self._run_privileged(
+                    "optimize",
+                    _("Updating Wi-Fi power saving…"),
                     lambda v=want: tc.set_wifi_powersave(v),
                     _after,
-                    busy_text=_("Updating Wi-Fi power saving…"),
+                    on_busy=_revert,
                 )
 
             ps_row.connect("notify::active", _on_ps_toggled)
@@ -460,19 +511,18 @@ class TunePages(PageGroup):
 
         return group
 
-    def _run_custom_dns(self) -> None:
-        def _after(res) -> None:
-            ok, err = _unpack_result(res)
-            if not ok:
-                self.app.toast(err or _("Could not open Custom DNS setup."))
-            self.refresh("optimize")
+    def _run_custom_dns(self, trigger_btn: Gtk.Button) -> None:
+        trigger_btn.set_sensitive(False)
 
-        run_async(
-            self.app,
-            tc.open_custom_dns_terminal,
-            _after,
-            busy_text=_("Running Custom DNS setup in terminal…"),
-        )
+        def _after(res) -> None:
+            trigger_btn.set_sensitive(True)
+            ok, err = _unpack_result(res)
+            if ok:
+                self.app.toast(_("Custom DNS setup opened in a terminal."))
+            else:
+                self.app.toast(err or _("Could not open Custom DNS setup."))
+
+        run_async(self.app, tc.open_custom_dns_terminal, _after)
 
     def _format_dns_times(self) -> str:
         if self._dns_testing:
@@ -623,9 +673,14 @@ class TunePages(PageGroup):
 
         rec_row.connect("notify::selected", _on_rec_selected)
         group.add(rec_row)
+        self._register_mutating("optimize", group)
         return group
 
     def _confirm_bt_change(self, key: str, value: object, label_text: str, on_cancel) -> None:
+        if self._action_busy or getattr(self.app, "busy", False):
+            self.app.toast(_("Wait until the running task is done."))
+            on_cancel()
+            return
         dialog = Adw.AlertDialog(
             heading=_("Save and restart Bluetooth?"),
             body=_(
@@ -650,13 +705,13 @@ class TunePages(PageGroup):
                     self.app.toast(_("Saved; Bluetooth restarted."))
                 else:
                     self.app.toast(err or _("Could not update Bluetooth settings."))
-                self.refresh("optimize")
 
-            run_async(
-                self.app,
+            self._run_privileged(
+                "optimize",
+                _("Updating Bluetooth configuration…"),
                 lambda: tc.set_bluetooth_option(key, value),
                 _after,
-                busy_text=_("Updating Bluetooth configuration…"),
+                on_busy=on_cancel,
             )
 
         dialog.connect("response", _on_response)
@@ -673,6 +728,7 @@ class TunePages(PageGroup):
             if not self.current("time", gen):
                 return
             clear(box)
+            self._mutating_widgets["time"] = []
             if not isinstance(data, dict):
                 box.append(_note_group(_("Time & Language"), _("Could not load time and language settings.")))
                 return
@@ -706,6 +762,7 @@ class TunePages(PageGroup):
             active=ntp_on,
             sensitive=can_ntp,
         )
+        self._register_mutating("time", ntp_row)
         ntp_state = {"current": ntp_on, "syncing": False}
 
         def _on_ntp_toggled(row: Adw.SwitchRow, _pspec) -> None:
@@ -715,6 +772,11 @@ class TunePages(PageGroup):
             if want == ntp_state["current"]:
                 return
 
+            def _revert() -> None:
+                ntp_state["syncing"] = True
+                row.set_active(ntp_state["current"])
+                ntp_state["syncing"] = False
+
             def _after(res) -> None:
                 ok, err = _unpack_result(res)
                 if ok:
@@ -723,13 +785,13 @@ class TunePages(PageGroup):
                     )
                 else:
                     self.app.toast(err or _("Could not change automatic date and time."))
-                self.refresh("time")
 
-            run_async(
-                self.app,
+            self._run_privileged(
+                "time",
+                _("Updating clock synchronization…"),
                 lambda v=want: tc.set_ntp(v),
                 _after,
-                busy_text=_("Updating clock synchronization…"),
+                on_busy=_revert,
             )
 
         ntp_row.connect("notify::active", _on_ntp_toggled)
@@ -742,6 +804,7 @@ class TunePages(PageGroup):
             subtitle=escape(_format_zone_label(tz)),
         )
         tz_btn = Gtk.Button(label=_("Change…"), valign=Gtk.Align.CENTER, sensitive=bool(zones))
+        self._register_mutating("time", tz_btn)
         tz_btn.connect("clicked", lambda *_: self._open_timezone_picker(zones, tz))
         tz_row.add_suffix(tz_btn)
         group.add(tz_row)
@@ -749,6 +812,9 @@ class TunePages(PageGroup):
         return group
 
     def _open_timezone_picker(self, zones: list[str], current: str) -> None:
+        if self._action_busy or getattr(self.app, "busy", False):
+            self.app.toast(_("Wait until the running task is done."))
+            return
         dialog = Adw.Dialog(
             title=_("Time zone"),
             content_width=460,
@@ -787,13 +853,12 @@ class TunePages(PageGroup):
                     self.app.toast(_("Time zone set to {0}.").format(_format_zone_label(zone)))
                 else:
                     self.app.toast(err or _("Could not change time zone."))
-                self.refresh("time")
 
-            run_async(
-                self.app,
+            self._run_privileged(
+                "time",
+                _("Changing time zone…"),
                 lambda z=zone: tc.set_timezone(z),
                 _after,
-                busy_text=_("Changing time zone…"),
             )
 
         def _populate(query: str) -> None:
@@ -862,7 +927,8 @@ class TunePages(PageGroup):
             subtitle=_("The system's language (LANG)."),
         )
         lang_row.set_sensitive(bool(locales))
-        lang_state = {"current": cur_lang, "syncing": False}
+        self._register_mutating("time", lang_row)
+        lang_state = {"current": cur_lang, "idx": lang_idx, "syncing": False}
 
         def _on_lang_selected(row: Adw.ComboRow, _pspec) -> None:
             if lang_state["syncing"]:
@@ -874,19 +940,24 @@ class TunePages(PageGroup):
             if not chosen or chosen == lang_state["current"] or chosen not in locales:
                 return
 
+            def _revert() -> None:
+                lang_state["syncing"] = True
+                row.set_selected(lang_state["idx"])
+                lang_state["syncing"] = False
+
             def _after(res) -> None:
                 ok, err = _unpack_result(res)
                 if ok:
                     self.app.toast(_("System language set to {0}.").format(_format_locale_label(chosen)))
                 else:
                     self.app.toast(err or _("Could not change system language."))
-                self.refresh("time")
 
-            run_async(
-                self.app,
+            self._run_privileged(
+                "time",
+                _("Updating system language…"),
                 lambda v=chosen: tc.set_locale(lang=v),
                 _after,
-                busy_text=_("Updating system language…"),
+                on_busy=_revert,
             )
 
         lang_row.connect("notify::selected", _on_lang_selected)
@@ -901,7 +972,8 @@ class TunePages(PageGroup):
             subtitle=_("Dates, times, numbers, money, and measurements."),
         )
         fmt_row.set_sensitive(bool(locales))
-        fmt_state = {"current": cur_formats, "syncing": False}
+        self._register_mutating("time", fmt_row)
+        fmt_state = {"current": cur_formats, "idx": fmt_idx, "syncing": False}
 
         def _on_fmt_selected(row: Adw.ComboRow, _pspec) -> None:
             if fmt_state["syncing"]:
@@ -913,19 +985,24 @@ class TunePages(PageGroup):
             if not chosen or chosen == fmt_state["current"] or chosen not in locales:
                 return
 
+            def _revert() -> None:
+                fmt_state["syncing"] = True
+                row.set_selected(fmt_state["idx"])
+                fmt_state["syncing"] = False
+
             def _after(res) -> None:
                 ok, err = _unpack_result(res)
                 if ok:
                     self.app.toast(_("Regional formats set to {0}.").format(_format_locale_label(chosen)))
                 else:
                     self.app.toast(err or _("Could not change regional formats."))
-                self.refresh("time")
 
-            run_async(
-                self.app,
+            self._run_privileged(
+                "time",
+                _("Updating regional formats…"),
                 lambda v=chosen: tc.set_locale(formats=v),
                 _after,
-                busy_text=_("Updating regional formats…"),
+                on_busy=_revert,
             )
 
         fmt_row.connect("notify::selected", _on_fmt_selected)
