@@ -108,3 +108,35 @@ with older copies), `apps1.png` (Maprisma apps with update pills, running, Insta
 - `Ctrl+F` focuses only the Plugins filter; the two pages have their own `Gtk.SearchEntry`
   (`AppsPages.search[key]`) if the window should route Ctrl+F there.
 - The `--page` list in README's command line line and the "All 13 pages" sentence are not updated (shared).
+
+## Round 1 fixes (Antigravity review, docs/reviews/b-apps.md)
+
+All 11 findings were checked against the code and, where they depend on the system, read-only on it.
+All verified; all fixed (commit "task B review round 1 fixes").
+
+1. Medium, `yay -Qua` note `[1h11m]` dropped AUR updates: verified live (`artcraft-launcher 0.20.1-1 ->
+   0.20.3-1 [1h11m]`). The update line pattern now takes an optional bracketed note; `[ignored]` lines are
+   left out. Regression test added. The page now shows that AUR update.
+2. Medium, launchers with spaces (`Google Maps.desktop` etc.) missing: verified (three Omarchy web apps
+   here). New `valid_entry_id()` (system_core's id rule, or a top-level name passing the launcher-name
+   pattern) for the scan; Open passes such a launcher by its file path to `uwsm-app` (uwsm takes a
+   desktop file path). "Start at login" stays gated on system_core's id rule. Test + screenshot
+   (`scratchpad/task-b/shots/system_r1.png`).
+3. Medium, stale update marks after an update within 60 s: verified. `_update_of()` drops a cached update
+   when the app is already at the new version; the Refresh button and every terminal action reset the
+   60 s throttle, so the next load asks the tools again (F5 keeps the throttle).
+4. Medium, "Start at login" on a switched-off autostart entry failed with "already in autostart":
+   verified (`add_autostart` refuses an existing file). It now falls back to
+   `system_core.toggle_autostart(id, True)`.
+5. Low, Maprisma page had no icon files: `read_maprisma_apps()` returns `icons` now.
+6. Low, `install_command()` guards: added `..` in repo, tag `.`/`..`, and a linked or non-folder
+   `~/Applications`; tests added.
+7. Low, `a is not app` after a refresh: now compares `key`.
+8. Low, Flatpak single-app Update had no dialog: it now asks first ("Update {0}?", `Update…` in the menu).
+9. Low, older-copies size/text: size counts only the files that go; the text says the copy in use stays
+   (the linked copy may be older than another one).
+10. Low, test fake `wait()` raised in the reaper thread: fixed (`TimeoutExpired` only with a timeout).
+11. Low, Maprisma Settings found through a link could not be started: `open_argv()` checks and starts the
+    link's target, and `settings_program` is set only when `maprisma_settings_argv()` works; test added.
+
+Tests: `tests/test_apps_core.py` now 44 tests; translations test and full suite (148) pass.
