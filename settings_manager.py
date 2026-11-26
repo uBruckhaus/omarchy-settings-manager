@@ -9,7 +9,7 @@ Laid out like Maprisma Settings (a reorderable sidebar of pages left, the page r
 - Network, Bluetooth, Appearance, Theme, Displays, Sound, Notifications, AI, Voice, Power, Optimize,
   Input devices, Applications, Time & Language, About: desktop and system settings (pages_desktop,
   pages_system, pages_theme, pages_services, pages_tune). Admin steps only on a click: polkit
-  (timedatectl, localectl, one pkexec call) or a visible terminal for package changes.
+  (timedatectl, localectl, pkexec with constant scripts) or a visible terminal (packages, mirrors).
 - Settings: language, update check on opening, Omarchy's own plugins, corners, F12 screenshot key.
 
 A normal app window: started again, it comes to the front; `--toggle` (the bar icon) closes it
@@ -359,6 +359,13 @@ class SettingsManager(Adw.Application):
     def sidebar_pages(self) -> list[str]:
         return [item for item in self.settings["sidebar_order"] if item in PAGE_MAP and not self.page_hidden(item)]
 
+    def next_visible(self, order: list[str], index: int) -> str | None:
+        """The next item after `index` that the sidebar shows (a page or a separator), or None."""
+        for item in order[index + 1:]:
+            if item == SEPARATOR or not self.page_hidden(item):
+                return item
+        return None
+
     def rebuild_sidebar(self):
         if self._sidebar_popover is not None:
             if self._sidebar_popover.get_parent() is not None:
@@ -371,7 +378,8 @@ class SettingsManager(Adw.Application):
         for idx, item in enumerate(order):
             if item != SEPARATOR and self.page_hidden(item):
                 continue
-            if item == SEPARATOR and (last_shown == SEPARATOR or idx == len(order) - 1):
+            if item == SEPARATOR and (last_shown == SEPARATOR or not any(
+                    x != SEPARATOR and not self.page_hidden(x) for x in order[idx + 1:])):
                 continue
             last_shown = item
             if item == SEPARATOR:
@@ -413,7 +421,8 @@ class SettingsManager(Adw.Application):
 
     def _add_sidebar_sep(self, index: int):
         order = list(self.settings["sidebar_order"])
-        if 0 <= index < len(order) - 1 and order[index + 1] != SEPARATOR:
+        nxt = self.next_visible(order, index) if 0 <= index < len(order) else None
+        if nxt is not None and nxt != SEPARATOR:
             order.insert(index + 1, SEPARATOR)
             self._apply_sidebar_order(order)
 
@@ -489,7 +498,8 @@ class SettingsManager(Adw.Application):
             if is_sep:
                 item(_("Remove this separator"), lambda: self._remove_sidebar_sep(index))
             else:
-                can_add = index < len(order) - 1 and order[index + 1] != SEPARATOR
+                nxt = self.next_visible(order, index)
+                can_add = nxt is not None and nxt != SEPARATOR
                 item(_("Add a separator below"), lambda: self._add_sidebar_sep(index), sensitive=can_add)
             item(_("Default order"), lambda: self._apply_sidebar_order(list(DEFAULT_SIDEBAR_ORDER)))
             popover.set_child(box)
@@ -548,7 +558,9 @@ class SettingsManager(Adw.Application):
             return True
         if ctrl and keyval in (Gdk.KEY_f, Gdk.KEY_F):
             current = self.current_page()      # a page with its own filter field keeps Ctrl+F
-            field = getattr(self.page_group(current), "search", {}).get(current)
+            group = self.page_group(current)
+            finder = getattr(group, "search_entry", None)
+            field = finder(current) if callable(finder) else getattr(group, "search", {}).get(current)
             if field is not None:
                 field.grab_focus()
                 return True

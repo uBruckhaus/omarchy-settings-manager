@@ -156,7 +156,7 @@ def launch(argv: list, timeout: float = 2.0) -> tuple[bool, str]:
     settings window) and return: `run()` would wait for its pipes, which the window keeps open. Fixed
     argv, no shell, no inherited pipes, its own session; a launcher still running after `timeout`
     is fine (its window is open) and is reaped on a daemon thread. Callers validate the argv."""
-    if not argv or not argv[0] or not all(isinstance(a, str) and "\x00" not in a for a in argv):
+    if not isinstance(argv, (list, tuple)) or not argv or not argv[0] or not all(isinstance(a, str) and "\x00" not in a for a in argv):
         return False, "invalid command"
     program = argv[0] if os.path.isabs(argv[0]) else shutil.which(argv[0])
     if program is None:

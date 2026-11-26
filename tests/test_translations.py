@@ -85,6 +85,23 @@ class SidebarAndArgsTests(unittest.TestCase):
         self.assertEqual(sm.parse_args(["--toggle"])["toggle"], True)
 
 
+class TranslationPartConflictTests(unittest.TestCase):
+    def test_no_key_has_different_translations_in_two_files(self):
+        """The loader merges <lang>.json and translations/<lang>/*.json into one table, so a key
+        translated differently in two files would silently depend on the file order."""
+        for code, _name in i18n.LANGUAGES:
+            if code == "en":
+                continue
+            files = [ROOT / "translations" / f"{code}.json", *sorted((ROOT / "translations" / code).glob("*.json"))]
+            seen: dict = {}
+            for path in files:
+                for key, value in json.loads(path.read_text(encoding="utf-8")).items():
+                    if key in seen:
+                        self.assertEqual(seen[key][1], value, f"{code}: {key!r} differs in {seen[key][0]} and {path.name}")
+                    else:
+                        seen[key] = (path.name, value)
+
+
 class MaprismaSectionTests(unittest.TestCase):
     def test_switch_on_by_default_and_detection(self):
         import tempfile

@@ -17,7 +17,7 @@ omarchy plugin add https://github.com/uBruckhaus/omarchy-settings-manager.git --
 Needs nothing beyond what Omarchy ships: Python 3 with PyGObject, GTK 4 and libadwaita, git, curl,
 `wl-paste`, and standard desktop tools (`hyprctl`, `pactl`, `bluetoothctl`, `nmcli`/`iwctl`,
 `powerprofilesctl`, `xdg-mime`, `omarchy-*`). It runs as your user. A few changes on the Optimize,
-Time & Language and System apps pages need the administrator password: they ask for it only when you
+Time & Language, System apps and Voice pages need the administrator password: they ask for it only when you
 click them (polkit, or sudo inside a visible terminal) — see "How it changes things".
 
 ## Remove
@@ -114,7 +114,8 @@ Maprisma pages" (on by default) hides them.
   (`/etc/sysctl.d/99-zz-settings-manager-network.conf`), Wi-Fi power saving via NetworkManager, and
   BlueZ options in `/etc/bluetooth/main.conf` (`FastConnectable`, `Experimental`, `AutoEnable`,
   `ReconnectAttempts`). *Needs administrator password* (polkit/`pkexec`, only on explicit clicks)
-  for changing DNS, toggling TCP BBR, modifying Wi-Fi power saving, and saving/restarting Bluetooth.
+  for changing DNS, toggling TCP BBR, modifying Wi-Fi power saving, saving/restarting Bluetooth and
+  ranking mirrors (only offered when the mirrors are not Omarchy's pinned ones).
 - **Time & Language**: automatic date and time (NTP) and searchable time zone picker via
   `timedatectl`, plus system language (`LANG`) and regional formats (`LC_TIME`, `LC_NUMERIC`,
   `LC_MONETARY`, `LC_MEASUREMENT`, `LC_PAPER`) via `localectl` (listing only generated locales).
@@ -149,6 +150,7 @@ asks for the administrator password itself:
 | Optimize | DNS provider | `omarchy dns <DHCP\|Cloudflare\|Google>` (Omarchy's script asks polkit); `Custom` in a visible terminal |
 | Optimize | TCP BBR | one `pkexec /bin/sh -c '<constant script>' sh <allowlisted values>`: writes `/etc/sysctl.d/99-zz-settings-manager-network.conf` and runs `sysctl -w` |
 | Optimize | Bluetooth options | one `pkexec` call with a constant script: copies the edited `main.conf` (size-capped, SHA-256 checked) into `/etc/bluetooth` and restarts Bluetooth; asks first |
+| Optimize | Rank pacman mirrors (only offered when the mirrors are not Omarchy's pinned ones) | `pkexec /usr/bin/rate-mirrors … --save /etc/pacman.d/mirrorlist` or `pkexec /usr/bin/reflector … --save …` in a visible terminal; asks first |
 | Optimize | Wi-Fi power saving | `nmcli connection modify` (NetworkManager's own polkit rules) |
 | Time & Language | NTP, time zone, language, formats | `timedatectl` / `localectl` (they ask polkit themselves) |
 | System apps | Uninstall a package, Update the system | `omarchy-pkg-drop`, `omarchy-update` in a visible terminal (sudo asks there) |
@@ -196,14 +198,22 @@ with its process group. Text from manifests and system tools is cleaned before i
 ## Network and capabilities
 
 - **Network:** the update check runs `git fetch` against each plugin checkout's `origin`, only when that
-  is an https URL (you can turn the check off in Settings). Beyond that, the network is only used by
-  what you start yourself: Update (Omarchy's `git pull`), Network page connection actions, and the
-  GitHub or marketplace links, which open in your browser. Settings Manager does not install plugins.
+  is an https URL (you can turn the check off in Settings). When you open or refresh a page:
+  Maprisma apps asks GitHub's releases API for each app's latest release (`curl`, unauthenticated, cached
+  10 min) and System apps asks the update tools (`checkupdates`, `yay`/`paru -Qua`,
+  `flatpak remote-ls --updates`). Everything else only when you click it: Update (Omarchy's `git pull`),
+  installing a Maprisma AppImage from GitHub (SHA-256 checked), system/Flatpak updates and dictation
+  installers in a visible terminal, the DNS speed test (two small UDP queries per resolver), Network
+  page connection actions, and GitHub or marketplace links, which open in your browser. Settings
+  Manager does not install plugins.
 - **Updating and removing plugins** is only done when you press the button and, for remove, confirm a
   dialog. It runs Omarchy's own `omarchy-plugin-update` and `-remove` (argv, never a shell). Settings
   Manager refuses to remove itself.
-- **Your files:** `shell.json` is changed only through the shell's IPC, and only by your actions (move,
-  put in, take out, a setting you edit). Right before a move or a setting change the running shell's
+- **Your files:** `shell.json` is changed through the shell's IPC, and only by your actions (move,
+  put in, take out, a setting you edit). The one exception is the Power page's idle timers: it rewrites
+  only the `idle` object of `shell.json` itself (atomically, every other key and its order kept,
+  refused when the file changed meanwhile), since the shell has no IPC for them. The AI page writes two
+  keys of `~/.config/maprisma-ai/settings.json` the way the Maprisma apps do. Right before a move or a setting change the running shell's
   layout is read again; if the sections involved differ from what the window showed, or the shell doesn't
   answer, nothing is changed. The shell itself also refuses when the entry at that place is not the named
   widget. Its own settings and state files are written atomically (random-named temp file, `0600`,

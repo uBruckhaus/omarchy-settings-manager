@@ -160,6 +160,13 @@ class DesktopPages:
         stack.add_named(self._build_input_page(), "input")
         stack.add_named(self._build_applications_page(), "applications")
 
+    def search_entry(self, page_key: str):
+        """Ctrl+F: the filter field of the Network tab in view (LAN devices, Monitor), else None."""
+        if page_key != "network" or self._net_stack is None:
+            return None
+        sub = self._net_stack.get_visible_child_name()
+        return {"lan": self._lan_search, "monitor": self._mon_search}.get(sub or "")
+
     def refresh(self, page_key: str) -> None:
         if page_key == "network":
             sub = self._net_stack.get_visible_child_name() if self._net_stack else "connections"

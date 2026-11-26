@@ -304,7 +304,7 @@ class AppsPages(PageGroup):
             box.append(group)
         if available:
             group = Adw.PreferencesGroup(
-                title=escape(_("Not installed")),
+                title=escape(_("Not installed yet")),
                 description=escape(_("Apps with a release AppImage can be installed here; the others are built "
                                      "from source (see their GitHub page).")))
             for app in available:
@@ -389,7 +389,7 @@ class AppsPages(PageGroup):
         if release:
             latest = release["tag"]
         else:
-            latest = _("not checked") if app.get("release") else _("none")
+            latest = _("not checked") if app.get("release") else _("no release")
         facts = [
             (_("Installed as"), _(HOW_NAMES.get(app.get("how"), "launcher only"))),
             (_("Version"), app.get("version") or _("unknown")),

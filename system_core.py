@@ -649,7 +649,7 @@ def _read_shell_json() -> tuple[str | None, dict | None]:
         return None, None
     try:
         data = json.loads(text)
-    except ValueError:
+    except (ValueError, RecursionError):
         return text, None
     return text, data if isinstance(data, dict) else None
 
