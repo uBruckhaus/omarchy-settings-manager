@@ -73,12 +73,17 @@ class SvgProblemTest(unittest.TestCase):
                       "<style>.a{content:'/*'} .b{fill:url('//evil.example/t.png')} .c{content:'*/'}</style>",
                       '<path style=\'content:"/*";filter:url("file:///etc/passwd");content:"*/"\' d="M0 0h1v1z"/>',
                       '<style>.a{content:"/* unclosed}</style>',
-                      '<style>.a{fill:red} */</style>'):
+                      '<style>.a{fill:red} */</style>',
+                      # round 3: newline inside a string, /* inside an unquoted url(: any comment is refused
+                      '<style>.a{content:"\n} .b{content:"/*"} .c{fill:url("https://evil.example/t.png")} .d{content:"*/"}</style>',
+                      '<style>.a{fill:url(#a/*)} .b{fill:url("https://evil.example/t.png")} .c{d:e(*/)}</style>',
+                      '<path style="content:&quot;&#10;;&quot;/*&quot;;fill:url(//x);&quot;*/&quot;" d="M0 0h1v1z"/>',
+                      '<style>/* only a comment */</style>'):
             with self.subTest(inner=inner):
                 self.assertIsNotNone(ic.svg_problem(self.wrap(inner)))
 
     def test_internal_references_and_comments_still_pass(self):
-        for inner in ("<style>/* Adwaita */ .a { fill: url(#grad1); stroke: url('#g2') }</style>",
+        for inner in ("<style>.a { fill: url(#grad1); stroke: url('#g2') }</style>",
                       '<defs><linearGradient id="g"/></defs><path fill="url(#g)" d="M0 0h1v1z"/>',
                       '<defs><path id="p" d="M0 0h1v1z"/></defs><use href="#p"/><use xlink:href="#p"/>',
                       '<defs><path id="0" d="M0 0h1v1z"/></defs><use href="#0"/><path fill="url(#0)" d="M0 0h1v1z"/>'):

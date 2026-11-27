@@ -236,48 +236,14 @@ def _tag_namespace(tag: str) -> str:
     return ""
 
 
-def _without_css_comments(css: str) -> str | None:
-    """`css` with its comments replaced by spaces, the way a CSS parser reads it: a /* or */ inside
-    a quoted string is part of the string. None for an unclosed comment or string, or a stray */.
-    (Backslash escapes are refused before, so a quote can't be escaped.)"""
-    out: list[str] = []
-    quote = None
-    i, n = 0, len(css)
-    while i < n:
-        ch = css[i]
-        if quote is not None:
-            out.append(ch)
-            if ch == quote:
-                quote = None
-            i += 1
-        elif ch in "'\"":
-            quote = ch
-            out.append(ch)
-            i += 1
-        elif css.startswith("/*", i):
-            end = css.find("*/", i + 2)
-            if end < 0:
-                return None
-            out.append(" ")
-            i = end + 2
-        elif css.startswith("*/", i):
-            return None
-        else:
-            out.append(ch)
-            i += 1
-    return None if quote is not None else "".join(out)
-
-
 def _css_problem(css: str) -> str | None:
     # CSS escapes (`u\72l(`, `@\69mport`) could hide a reference: refused, icons don't need them.
     if "\\" in css:
         return "a CSS escape (backslash)"
+    # Comments could hide where a url( or a string ends (CSS parsers read them differently from any
+    # simple check): refused. No icon of the installed themes (about 110000 files) has one.
     if "/*" in css or "*/" in css:
-        # Comments could hide where a url( ends: dropped first, as a CSS parser reads them.
-        stripped = _without_css_comments(css)
-        if stripped is None:
-            return "an unclosed CSS comment or string"
-        css = stripped
+        return "a CSS comment"
     lower = css.lower()
     compact = _COMPACT_WS_RE.sub("", lower)
     if "@import" in compact:
@@ -1557,6 +1523,8 @@ def _reset_icon(key: str) -> tuple[bool, str]:
                 base = entry.name
                 if not (base.startswith(f"{stem}-") and base.endswith("-symbolic.svg")):
                     continue
+                if base[len(stem):] not in STATE_VARIANT_SUFFIXES:
+                    continue                     # another icon whose name starts like this one
                 try:
                     st = entry.stat(follow_symlinks=False)
                 except OSError:
