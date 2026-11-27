@@ -67,7 +67,13 @@ class SvgProblemTest(unittest.TestCase):
                       '<g xml:base="//evil.example/"><path d="M0 0h1v1z"/></g>',
                       '<style>.a { fill: url(#a) } /* unclosed</style>',
                       '<path fill="url(#a) url(//x)" d="M0 0h1v1z"/>',
-                      '<use href="#a b"/>'):
+                      '<use href="#a b"/>',
+                      # round 2: comment marks inside CSS strings, in <style> and in style=""
+                      '<style>.a{content:"/*"} .b{fill:url("https://evil.example/t.png")} .c{content:"*/"}</style>',
+                      "<style>.a{content:'/*'} .b{fill:url('//evil.example/t.png')} .c{content:'*/'}</style>",
+                      '<path style=\'content:"/*";filter:url("file:///etc/passwd");content:"*/"\' d="M0 0h1v1z"/>',
+                      '<style>.a{content:"/* unclosed}</style>',
+                      '<style>.a{fill:red} */</style>'):
             with self.subTest(inner=inner):
                 self.assertIsNotNone(ic.svg_problem(self.wrap(inner)))
 
@@ -82,6 +88,12 @@ class SvgProblemTest(unittest.TestCase):
     def test_expensive_drawing_is_refused(self):
         nested = '<defs><g id="a"><path d="M0 0h1v1z"/></g><g id="b"><use href="#a"/><use href="#a"/></g></defs><use href="#b"/>'
         self.assertIn("<use>", ic.svg_problem(self.wrap(nested)))
+        # round 2: decoys with the same id after the real definition, and xml:id
+        decoy = ('<defs><g id="a"><path d="M0 0h1v1z"/></g><g id="b"><use href="#a"/><use href="#a"/></g></defs>'
+                 '<use href="#b"/><g id="b"/>')
+        self.assertIn("<use>", ic.svg_problem(self.wrap(decoy)))
+        xml_id = ('<defs><g id="a"><path d="M0 0h1v1z"/></g><g xml:id="b"><use href="#a"/></g></defs><use href="#b"/>')
+        self.assertIn("<use>", ic.svg_problem(self.wrap(xml_id)))
         self.assertIsNone(ic.svg_problem(self.wrap('<filter id="f"><feGaussianBlur stdDeviation="1"/></filter>')))
         parts = '<feOffset dx="1"/>' * ic.MAX_SVG_FILTER_PARTS
         self.assertIsNotNone(ic.svg_problem(self.wrap(f'<filter id="f">{parts}</filter>')))

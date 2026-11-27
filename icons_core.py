@@ -126,7 +126,6 @@ _URL_RE = re.compile(r"url\(\s*([^)]*)(?:\)|$)")
 # The only reference an icon may make: to an element of its own (`#id`, or url(#id) / url('#id')).
 _FRAGMENT_RE = re.compile(r"#[A-Za-z0-9_][A-Za-z0-9_.:-]{0,127}")      # Breeze uses ids like "0"
 _CSS_URL_ARG_RE = re.compile(r"""(?:#[a-z0-9_][a-z0-9_.:-]{0,127}|'#[a-z0-9_][a-z0-9_.:-]{0,127}'|"#[a-z0-9_][a-z0-9_.:-]{0,127}")""")
-_CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
 # Filters can make one small file slow to draw: a few are fine (Adwaita's colour icons use them).
 MAX_SVG_FILTER_PARTS = 16
 FILTER_ELEMENTS = frozenset({"filter", "feblend", "fecolormatrix", "fecomponenttransfer", "fecomposite",
@@ -237,15 +236,48 @@ def _tag_namespace(tag: str) -> str:
     return ""
 
 
+def _without_css_comments(css: str) -> str | None:
+    """`css` with its comments replaced by spaces, the way a CSS parser reads it: a /* or */ inside
+    a quoted string is part of the string. None for an unclosed comment or string, or a stray */.
+    (Backslash escapes are refused before, so a quote can't be escaped.)"""
+    out: list[str] = []
+    quote = None
+    i, n = 0, len(css)
+    while i < n:
+        ch = css[i]
+        if quote is not None:
+            out.append(ch)
+            if ch == quote:
+                quote = None
+            i += 1
+        elif ch in "'\"":
+            quote = ch
+            out.append(ch)
+            i += 1
+        elif css.startswith("/*", i):
+            end = css.find("*/", i + 2)
+            if end < 0:
+                return None
+            out.append(" ")
+            i = end + 2
+        elif css.startswith("*/", i):
+            return None
+        else:
+            out.append(ch)
+            i += 1
+    return None if quote is not None else "".join(out)
+
+
 def _css_problem(css: str) -> str | None:
     # CSS escapes (`u\72l(`, `@\69mport`) could hide a reference: refused, icons don't need them.
     if "\\" in css:
         return "a CSS escape (backslash)"
     if "/*" in css or "*/" in css:
-        # Comments could hide where a url( ends: they are dropped first, an unclosed one is refused.
-        css = _CSS_COMMENT_RE.sub(" ", css)
-        if "/*" in css or "*/" in css:
-            return "an unclosed CSS comment"
+        # Comments could hide where a url( ends: dropped first, as a CSS parser reads them.
+        stripped = _without_css_comments(css)
+        if stripped is None:
+            return "an unclosed CSS comment or string"
+        css = stripped
     lower = css.lower()
     compact = _COMPACT_WS_RE.sub("", lower)
     if "@import" in compact:
@@ -315,10 +347,10 @@ def svg_problem(data: bytes) -> str | None:
     try:
         root = ET.fromstring(text, parser=ET.XMLParser(target=builder))
     except (ET.ParseError, ValueError, RecursionError) as exc:
-        return f"not well-formed XML ({exc})"
+        return f"not well-formed XML ({_snip(exc)})"
 
     if builder.pis:
-        return f"has a processing instruction (<?{builder.pis[0]}?>)"
+        return f"has a processing instruction (<?{_snip(builder.pis[0])}?>)"
     if root.tag != SVG_ROOT_TAG:
         return f"not an SVG (the root is <{_snip(root.tag)}>)"
 
@@ -374,14 +406,21 @@ def svg_problem(data: bytes) -> str | None:
         return f"more than {MAX_SVG_USES} <use> elements"
     if uses:
         # A <use> of something that holds a <use> again could multiply on drawing: refused.
-        by_id = {e.get("id"): e for e in root.iter() if isinstance(e.tag, str) and e.get("id")}
-        for ref in set(uses):
-            target = by_id.get(ref)
-            if target is None:
+        # Every element with that id (a renderer takes the first, a duplicate must not hide it), by
+        # id and xml:id.
+        by_id: dict[str, list[ET.Element]] = {}
+        for e in root.iter():
+            if not isinstance(e.tag, str):
                 continue
-            for inner in target.iter():
-                if isinstance(inner.tag, str) and _local_name(inner.tag).lower() == "use":
-                    return "a <use> of an element that holds another <use>"
+            for name in ("id", "{http://www.w3.org/XML/1998/namespace}id"):
+                value = e.get(name)
+                if value:
+                    by_id.setdefault(value, []).append(e)
+        for ref in set(uses):
+            for target in by_id.get(ref, ()):
+                for inner in target.iter():
+                    if isinstance(inner.tag, str) and _local_name(inner.tag).lower() == "use":
+                        return "a <use> of an element that holds another <use>"
     return None
 
 
@@ -522,6 +561,7 @@ def theme_chain(theme: str) -> list[str]:
             or current == "hicolor"
             or "/" in current
             or "\\" in current
+            or "\x00" in current
             or current in (".", "..")
         ):
             continue
@@ -567,7 +607,7 @@ def theme_svgs(chain: list[str], symbolic_only: bool = True) -> dict[str, dict]:
     out: dict[str, dict[str, str]] = {}
     bases = icon_base_dirs()
     for theme in chain:
-        if not theme or "/" in theme or "\\" in theme or theme in (".", ".."):
+        if not theme or "/" in theme or "\\" in theme or "\x00" in theme or theme in (".", ".."):
             continue
         found: dict[str, str] = {}
         for base in bases:
