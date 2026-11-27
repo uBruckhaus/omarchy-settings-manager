@@ -4,7 +4,9 @@ Manage your installed Omarchy shell plugins and Hyprland/Omarchy desktop setting
 laid out like a settings app (a reorderable sidebar of pages left, the page right; modelled on
 Maprisma Settings).
 
-Version 1.1.0 · plugin id `ubruckhaus.settings-manager` · MIT
+Version 1.1.1 · plugin id `ubruckhaus.settings-manager` · MIT
+
+**Works on Omarchy 4.5 and 4.6.** Every `omarchy-*` command and shell call it uses exists in both. Omarchy 4.6 installs the coding agents as system packages; the AI page finds them on PATH first, then in mise (Omarchy 4.5). After the Maprisma Icon Picker changes or resets a bar icon, the shell is restarted (`omarchy restart shell`), because the shell keeps a named tray icon cached while it runs; this window stays open.
 
 ## Install
 
