@@ -1473,7 +1473,9 @@ class IconPickerDialog(Adw.Dialog):
             self._working = False
             ok, msg = _pair(result)
             if ok:
-                self.app.toast(_("Icon updated."))
+                # The shell keeps named tray icons cached while it runs: reload it so the bar shows it.
+                self.app.toast(_("Icon updated. The bar reloads to show it."))
+                self.app.restart_shell()
                 if self.on_changed is not None:
                     self.on_changed()
                 if not self._closed:
@@ -1495,7 +1497,8 @@ class IconPickerDialog(Adw.Dialog):
             self._working = False
             ok, msg = _pair(result)
             if ok:
-                self.app.toast(_("Icon reset to original."))
+                self.app.toast(_("Icon reset to original. The bar reloads to show it."))
+                self.app.restart_shell()
                 if self.on_changed is not None:
                     self.on_changed()
                 if not self._closed:

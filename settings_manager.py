@@ -821,9 +821,14 @@ class SettingsManager(Adw.Application):
     def offer_shell_restart(self, text: str):
         """After an update: a bar widget's new code only loads with a fresh shell."""
         toast = Adw.Toast(title=escape(text), timeout=10, button_label=_("Restart the shell"))
-        toast.connect("button-clicked", lambda *_: threading.Thread(
-            target=core.run, args=(["omarchy", "restart", "shell"],), kwargs={"timeout": 30}, daemon=True).start())
+        toast.connect("button-clicked", lambda *_: self.restart_shell())
         self.toasts.add_toast(toast)
+
+    def restart_shell(self):
+        """`omarchy restart shell` in the background (Omarchy 4.5 and 4.6). This window runs in a
+        scope of its own (uwsm app), so it stays open."""
+        threading.Thread(target=core.run, args=(["omarchy", "restart", "shell"],),
+                         kwargs={"timeout": 30}, daemon=True).start()
 
     # --- jobs ----------------------------------------------------------------------------------
 
