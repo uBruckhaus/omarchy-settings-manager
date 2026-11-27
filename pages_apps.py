@@ -24,6 +24,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, GLib, Gtk, Pango  # noqa: E402
 
 import apps_core  # noqa: E402
+import release_pins  # noqa: E402
 import system_core  # noqa: E402
 from i18n import N_, _, ngettext  # noqa: E402
 from pages_base import PageGroup  # noqa: E402
@@ -332,7 +333,8 @@ class AppsPages(PageGroup):
         return row
 
     def available_row(self, app: dict) -> Adw.ActionRow:
-        release = self._release_of(app)
+        # Only the release pinned with this plugin version is offered (never GitHub's current "latest").
+        release = release_pins.pinned_release(app.get("repo", "")) if app.get("release") else None
         image = (release or {}).get("appimage")
         if image:
             subtitle = _("{0} · AppImage, {1}").format(release["version"] or release["tag"],
@@ -349,7 +351,7 @@ class AppsPages(PageGroup):
         row.add_prefix(self.icon(app.get("icon") or ""))
         if image:
             button = Gtk.Button(label=_("Install"), valign=Gtk.Align.CENTER, css_classes=["suggested-action"])
-            button.connect("clicked", lambda *_a: self.confirm_install(app, release))
+            button.connect("clicked", lambda *_a: self.confirm_install(app))
             row.add_suffix(button)
         if app.get("repo"):
             row.add_suffix(self._menu(lambda: [(_("Open on GitHub"), lambda: self.app.open_uri(_github(app["repo"])), ())]))
@@ -404,16 +406,19 @@ class AppsPages(PageGroup):
             facts.append((_("Older copy"), f"{old['file']} ({format_bytes(old.get('size', 0))})"))
         self.show_facts(app["name"], [(k, v) for k, v in facts if v])
 
-    def confirm_install(self, app: dict, release: dict) -> None:
-        command = apps_core.install_command(app.get("repo", ""), release)
-        if command is None:
-            self.app.toast(_("{0} can't be installed from here: the file is already in ~/Applications, or the "
-                             "release has no checked AppImage.").format(app["name"]))
+    def confirm_install(self, app: dict) -> None:
+        command = apps_core.install_command(app.get("repo", ""))
+        release = release_pins.pinned_release(app.get("repo", ""))
+        if command is None or release is None:
+            self.app.toast(_("{0} can't be installed from here: the file is already in ~/Applications, or this "
+                             "version of Settings Manager has no reviewed release of it for this "
+                             "computer.").format(app["name"]))
             return
         image = release["appimage"]
         body = _("Downloads {0} ({1}) from the GitHub release {2} into ~/Applications. A terminal shows the "
-                 "download; the file is checked against the SHA-256 GitHub publishes and never replaces "
-                 "another file. Open it from here or from Maprisma Launcher afterwards.").format(
+                 "download; the file is checked against the SHA-256 reviewed with this version of Settings "
+                 "Manager and never replaces another file. Newer releases come with a Settings Manager update "
+                 "or through Maprisma Launcher. Open it from here or from Maprisma Launcher afterwards.").format(
             image["name"], format_bytes(image["size"]), release["tag"])
         self.confirm(_("Install {0}?").format(app["name"]), body, _("Install"),
                      lambda: self.terminal(command, _("A terminal installs {0}.").format(app["name"])))

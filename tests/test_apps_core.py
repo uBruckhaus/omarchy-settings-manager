@@ -619,29 +619,29 @@ class ReleaseTests(Sandbox):
         self.assertEqual(ac.check_releases(["maprisma/settings"]), {"maprisma/settings": None})
 
     def test_install_command(self):
-        release = ac.parse_release(release_json(), "maprisma/theme", arch="x86_64")
-        cmd = ac.install_command("maprisma/theme", release)
-        self.assertEqual(cmd[:2], ["sh", "-c"])
-        self.assertEqual(cmd[2], ac.INSTALL_SCRIPT)
-        self.assertNotIn("\n", ac.INSTALL_SCRIPT)
-        self.assertEqual(cmd[4:], [str(self.applications), release["appimage"]["url"], SHA,
-                                   str(self.applications / "Maprisma-Theme-0.7.2-x86_64.AppImage")])
-        self.assertIsNotNone(ac.terminal_argv(cmd))
-        self.assertIsNone(ac.install_command("maprisma/other", release))          # URL of another repo
-        tampered = json.loads(json.dumps(release))
-        tampered["appimage"]["sha256"] = "zz"
-        self.assertIsNone(ac.install_command("maprisma/theme", tampered))
-        self.assertIsNone(ac.install_command("maprisma/theme", None))
-        self.assertIsNone(ac.install_command("maprisma/..", release))
-        self.assertIsNone(ac.install_command("maprisma/theme", {**release, "tag": ".."}))
-        self.write(self.applications / "Maprisma-Theme-0.7.2-x86_64.AppImage", b"x")
-        self.assertIsNone(ac.install_command("maprisma/theme", release))          # never over a file
-        other = self.root / "other-apps"
-        other.mkdir()
-        link = self.root / "linked-Applications"
-        os.symlink(other, link)
-        with mock.patch.object(ac, "APPLICATIONS", link):
-            self.assertIsNone(ac.install_command("maprisma/theme", release))      # a linked ~/Applications
+        """Install takes the release pinned in release_pins.py, never GitHub's answer (mutable releases)."""
+        import release_pins
+        tag, files = release_pins.RELEASE_PINS["maprisma/theme"]
+        name, sha, _size = files["x86_64"]
+        with mock.patch("platform.machine", return_value="x86_64"):
+            cmd = ac.install_command("maprisma/theme")
+            self.assertEqual(cmd[:2], ["sh", "-c"])
+            self.assertEqual(cmd[2], ac.INSTALL_SCRIPT)
+            self.assertNotIn("\n", ac.INSTALL_SCRIPT)
+            self.assertEqual(cmd[4:], [str(self.applications),
+                                       f"https://github.com/maprisma/theme/releases/download/{tag}/{name}", sha,
+                                       str(self.applications / name)])
+            self.assertIsNotNone(ac.terminal_argv(cmd))
+            self.assertIsNone(ac.install_command("maprisma/other"))                  # no pin
+            self.assertIsNone(ac.install_command("maprisma/.."))
+            self.write(self.applications / name, b"x")
+            self.assertIsNone(ac.install_command("maprisma/theme"))                  # never over a file
+            other = self.root / "other-apps"
+            other.mkdir()
+            link = self.root / "linked-Applications"
+            os.symlink(other, link)
+            with mock.patch.object(ac, "APPLICATIONS", link):
+                self.assertIsNone(ac.install_command("maprisma/theme"))              # a linked ~/Applications
 
 
 class MaprismaAppsTests(Sandbox):

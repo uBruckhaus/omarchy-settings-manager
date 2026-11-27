@@ -4,7 +4,7 @@ Manage your installed Omarchy shell plugins and Hyprland/Omarchy desktop setting
 laid out like a settings app (a reorderable sidebar of pages left, the page right; modelled on
 Maprisma Settings).
 
-Version 1.1.1 · plugin id `ubruckhaus.settings-manager` · MIT
+Version 1.1.2 · plugin id `ubruckhaus.settings-manager` · MIT
 
 **Works on Omarchy 4.5 and 4.6.** Every `omarchy-*` command and shell call it uses exists in both. Omarchy 4.6 installs the coding agents as system packages; the AI page finds them on PATH first, then in mise (Omarchy 4.5). After the Maprisma Icon Picker changes or resets a bar icon, the shell is restarted (`omarchy restart shell`), because the shell keeps a named tray icon cached while it runs; this window stays open.
 
@@ -59,9 +59,12 @@ automatically when at least one other user plugin is installed besides Settings 
   mark from each app's latest GitHub release (asked on page load / Refresh only, unauthenticated, cached
   10 min). ⋮ menu: Open, Details, Show folder, GitHub/release page, remove older AppImage copies (to the
   trash). Updates and uninstalls of installed apps open **Maprisma Settings** at its Apps page (it swaps
-  running apps safely). Catalog apps that aren't installed and have a release AppImage get **Install**:
-  a visible terminal downloads the AppImage into `~/Applications`, checks GitHub's SHA-256 and never
-  replaces a file (Maprisma Launcher's method). No password needed.
+  running apps safely). Catalog apps that aren't installed get **Install** for the release **pinned in
+  this version** (`release_pins.py`: exact tag, AppImage file and SHA-256, reviewed with the plugin, as
+  the Maprisma plugin pins its build): a visible terminal downloads that file into `~/Applications`,
+  checks the pinned SHA-256 and never replaces a file. GitHub's answer (whose releases can change) only
+  feeds the "update available" mark; it is never installed. A newer release comes with a Settings
+  Manager update that pins it. No password needed.
 - **Plugins**: every installed plugin, grouped *In the bar*, *Running in the background* and *Not in
   use*, with a filter, inline update checks (**Check for updates**, **Update all**, and an *Updates
   available* group with expandable incoming commit lists), and a ⋮ menu: put it in the bar (left,
@@ -220,7 +223,7 @@ with its process group. Text from manifests and system tools is cleaned before i
   Maprisma Apps asks GitHub's releases API for each app's latest release (`curl`, unauthenticated, cached
   10 min) and Apps asks the update tools (`checkupdates`, `yay`/`paru -Qua`,
   `flatpak remote-ls --updates`). Everything else only when you click it: Update (Omarchy's `git pull`),
-  installing a Maprisma AppImage from GitHub (SHA-256 checked), system/Flatpak updates, dictation
+  installing a Maprisma AppImage from GitHub (the pinned release, SHA-256 checked), system/Flatpak updates, dictation
   installers and Voxtype model setup in a visible terminal, mirror ranking (on non-pinned systems),
   the DNS speed test (two small UDP queries per resolver), Network page connection actions, the Icon
   Picker's optional **Online gallery** tab (Iconify SVG packs from `cdn.jsdelivr.net`, allowlisted to

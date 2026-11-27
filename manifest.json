@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "ubruckhaus.settings-manager",
   "name": "Settings Manager",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "author": "Uwe Bruckhaus",
   "license": "MIT",
   "description": "Manage your Omarchy desktop settings, bar layout and shell plugins in one window, styled like Maprisma Settings: Apps, Maprisma Apps, Plugins (autodetected, with updates), Network & Wireless, Bluetooth, Appearance, Theme, drag-and-drop Bar with icon picker, Displays, Sound, Notifications, AI, Voice, Power, Optimize, Input, Applications, Time & Language and About. Admin steps only on click.",

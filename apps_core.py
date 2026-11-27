@@ -27,6 +27,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import plugins_core as core
+import release_pins
 import system_core
 
 HOME = Path.home()
@@ -1086,8 +1087,9 @@ def check_releases(repos: list[str], force: bool = False) -> dict:
 
 
 # The Launcher's GitHub install (github_releases.dart githubInstall): download privately into a
-# fresh folder next to the target, check GitHub's SHA-256, make it executable and hard-link it in
-# place; `ln` never replaces a file. It installs the AppImage only, it never runs it.
+# fresh folder next to the target, check the SHA-256 pinned in release_pins.py (never one from
+# GitHub's answer), make it executable and hard-link it in place; `ln` never replaces a file. It
+# installs the AppImage only, it never runs it.
 INSTALL_SCRIPT = ("set -eu; "
                   'mkdir -p -- "$1"; '
                   'tmp=$(mktemp -d "$1/.settings-manager-download.XXXXXX"); '
@@ -1100,9 +1102,14 @@ INSTALL_SCRIPT = ("set -eu; "
                   'echo "Installed: $4"')
 
 
-def install_command(repo: str, release: dict | None) -> list[str] | None:
-    """The terminal command that installs a catalog app's release AppImage into ~/Applications."""
-    if not isinstance(repo, str) or not SLUG_RE.match(repo) or ".." in repo or not isinstance(release, dict):
+def install_command(repo: str) -> list[str] | None:
+    """The terminal command that installs a catalog app's pinned release AppImage (release_pins.py,
+    reviewed with this plugin version) into ~/Applications; None when the app has no pin for this
+    machine. GitHub's current "latest" is never installed."""
+    if not isinstance(repo, str) or not SLUG_RE.match(repo) or ".." in repo:
+        return None
+    release = release_pins.pinned_release(repo)
+    if not isinstance(release, dict):
         return None
     image = release.get("appimage")
     tag = release.get("tag")
