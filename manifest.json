@@ -5,7 +5,7 @@
   "version": "1.1.0",
   "author": "Uwe Bruckhaus",
   "license": "MIT",
-  "description": "Manage Omarchy shell plugins and your desktop settings in one window, laid out like a settings app: Plugins, Bar layout with drag and drop, Updates, Maprisma apps, System apps, Network, Bluetooth, Appearance, Theme, Displays, Sound, Notifications, AI, Voice, Power, Optimize, Input devices, Applications, Time & Language and About. Admin changes only on your click, through polkit or a visible terminal.",
+  "description": "Manage your Omarchy desktop settings, bar layout and shell plugins in one window, styled like Maprisma Settings: Apps, Maprisma Apps, Plugins (autodetected, with updates), Network & Wireless, Bluetooth, Appearance, Theme, drag-and-drop Bar with icon picker, Displays, Sound, Notifications, AI, Voice, Power, Optimize, Input, Applications, Time & Language and About. Admin steps only on click.",
   "kinds": [
     "bar-widget"
   ],

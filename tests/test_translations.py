@@ -61,26 +61,57 @@ class TranslationCatalogTests(unittest.TestCase):
 
 
 class SidebarAndArgsTests(unittest.TestCase):
-    def test_normalize_sidebar_order_validates_dedupes_and_appends_missing(self):
+    def test_normalize_sidebar_order_validates_dedupes_and_inserts_missing(self):
         default = sm.normalize_sidebar_order(None)
         self.assertEqual(default, list(sm.DEFAULT_SIDEBAR_ORDER))
+        # Default order matches Maprisma Settings with Plugins inline and a single separator above Settings.
+        self.assertEqual(default[0], "system_apps")
+        self.assertEqual(default[1], "apps")
+        self.assertEqual(default[2], "plugins")
+        self.assertNotIn("updates", default)
+        self.assertEqual(default[-2:], ["---", "settings"])
+        self.assertEqual(default.count("---"), 1)
 
-        messy = ["---", "sound", "sound", "---", "---", "bogus", "plugins", "---"]
+        messy = ["---", "sound", "sound", "---", "---", "bogus", "updates", "plugins", "---"]
         cleaned = sm.normalize_sidebar_order(messy)
-        self.assertEqual(cleaned[0], "sound")
-        self.assertEqual(cleaned[1], "---")
-        self.assertEqual(cleaned[2], "plugins")
         self.assertNotIn("bogus", cleaned)
+        self.assertNotIn("updates", cleaned)
+        self.assertNotEqual(cleaned[0], "---")
         self.assertNotEqual(cleaned[-1], "---")
-        # Every known page appears exactly once.
+        # No consecutive separators.
+        self.assertFalse(any(a == "---" and b == "---" for a, b in zip(cleaned, cleaned[1:])))
+        # Every known page appears exactly once, and missing pages are inserted after their predecessor.
         pages = [x for x in cleaned if x != "---"]
         self.assertEqual(len(pages), len(sm.PAGE_KEYS))
         self.assertEqual(set(pages), set(sm.PAGE_KEYS))
+        self.assertEqual(cleaned.index("apps"), cleaned.index("system_apps") + 1)
+        self.assertEqual(cleaned.index("network"), cleaned.index("plugins") + 1)
 
-    def test_parse_args_accepts_every_page_and_rejects_unknown(self):
+    def test_next_visible_skips_hidden_pages(self):
+        class Fake:
+            page_hidden = sm.SettingsManager.page_hidden
+            next_visible = sm.SettingsManager.next_visible
+        fake = Fake()
+        fake.settings = {"show_maprisma": False, "show_plugins": False}
+        fake._maprisma_found = False
+        fake._plugins_found = False
+        order = ["system_apps", "apps", "plugins", "network", "---", "settings"]
+        self.assertEqual(fake.next_visible(order, 0), "network")
+        self.assertEqual(fake.next_visible(order, 3), "---")
+        self.assertEqual(fake.next_visible(order, 4), "settings")
+        self.assertIsNone(fake.next_visible(order, 5))
+
+    def test_parse_args_accepts_every_page_aliases_and_rejects_unknown(self):
         for key in sm.PAGE_KEYS:
             self.assertEqual(sm.parse_args(["--page", key])["page"], key)
             self.assertEqual(sm.parse_args([f"--page={key}"])["page"], key)
+        upd = sm.parse_args(["--page", "updates"])
+        self.assertEqual(upd["page"], "plugins")
+        self.assertTrue(upd["check_updates_now"])
+        for alias in ("system-apps", "installed-apps", "systemApps"):
+            parsed = sm.parse_args(["--page", alias])
+            self.assertEqual(parsed["page"], "system_apps")
+            self.assertFalse(parsed["check_updates_now"])
         self.assertEqual(sm.parse_args(["--page", "not-a-page"])["page"], "")
         self.assertEqual(sm.parse_args(["--toggle"])["toggle"], True)
 
@@ -127,12 +158,51 @@ class MaprismaSectionTests(unittest.TestCase):
         order = sm.normalize_sidebar_order(None)
         for show, found, visible in ((True, True, True), (True, False, False), (False, True, False)):
             fake = Fake()
-            fake.settings = {"show_maprisma": show, "sidebar_order": order}
+            fake.settings = {"show_maprisma": show, "show_plugins": False, "sidebar_order": order}
             fake._maprisma_found = found
+            fake._plugins_found = False
             pages = fake.sidebar_pages()
             self.assertEqual("apps" in pages, visible, (show, found))
             self.assertEqual("ai" in pages, visible, (show, found))
             self.assertIn("system_apps", pages)
+
+
+class PluginsSectionTests(unittest.TestCase):
+    def test_other_plugins_installed_detection(self):
+        from unittest import mock
+        with mock.patch.object(sm.core, "installed_folders", return_value={}):
+            self.assertFalse(sm.other_plugins_installed())
+        with mock.patch.object(sm.core, "installed_folders", return_value={sm.core.OWN_ID: Path("/tmp/sm")}):
+            self.assertFalse(sm.other_plugins_installed())
+        with mock.patch.object(
+            sm.core,
+            "installed_folders",
+            return_value={sm.core.OWN_ID: Path("/tmp/sm"), "ubruckhaus.hue-lights": Path("/tmp/hue")},
+        ):
+            self.assertTrue(sm.other_plugins_installed())
+
+    def test_plugins_page_hidden_with_show_plugins_setting(self):
+        import tempfile
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = Path(tmp) / "settings.json"
+            with mock.patch.object(sm, "SETTINGS_FILE", settings):
+                self.assertTrue(sm.load_settings()["show_plugins"])
+                settings.write_text('{"show_plugins": false}')
+                self.assertFalse(sm.load_settings()["show_plugins"])
+
+        class Fake:
+            page_hidden = sm.SettingsManager.page_hidden
+            sidebar_pages = sm.SettingsManager.sidebar_pages
+
+        order = sm.normalize_sidebar_order(None)
+        for show, found, visible in ((True, True, True), (True, False, False), (False, True, False), (False, False, False)):
+            fake = Fake()
+            fake.settings = {"show_maprisma": False, "show_plugins": show, "sidebar_order": order}
+            fake._maprisma_found = False
+            fake._plugins_found = found
+            self.assertEqual(fake.page_hidden("plugins"), not visible, (show, found))
+            self.assertEqual("plugins" in fake.sidebar_pages(), visible, (show, found))
 
 
 if __name__ == "__main__":

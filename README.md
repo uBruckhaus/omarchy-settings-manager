@@ -27,41 +27,23 @@ omarchy plugin remove ubruckhaus.settings-manager
 ```
 
 Its own files outside the plugin folder, deleted by hand if you want them gone:
-`~/.config/omarchy/settings-manager/` (its settings and Hyprland override state),
-`~/.config/hypr/settings-manager.lua` (only created if you save Hyprland overrides), and
-`~/Pictures/Settings Manager/` (F12 screenshots, only if you took any).
+`~/.config/omarchy/settings-manager/` (its settings, Hyprland override state, and backed-up bar
+icons), `~/.cache/omarchy-settings-manager/` (cached Iconify gallery packs, only if you opened the
+Online gallery tab), `~/.config/hypr/settings-manager.lua` (only created if you save Hyprland
+overrides), and `~/Pictures/Settings Manager/` (F12 screenshots, only if you took any).
 
 ## Pages
 
-All 21 pages live in a scrollable, reorderable sidebar. Drag any page row to reorder it; right-click
-a row to add or remove custom separators or restore the default order. On narrow windows (under
-720 sp), the sidebar automatically collapses into an overlay drawer toggled from the header bar.
-The Maprisma pages (Maprisma apps, AI) appear when a Maprisma app is installed; Settings › "Show the
-Maprisma pages" (on by default) hides them.
+All 20 pages live in a scrollable, floating, reorderable sidebar modelled on Maprisma Settings (a
+single default separator sits above Settings). Drag any page row or separator to reorder it;
+right-click a row, separator or the empty area below to add or remove separators or restore the
+default order. On narrow windows (under 648 sp), the sidebar automatically collapses into an overlay
+drawer toggled from the header bar. **Maprisma Apps** and **AI** appear automatically when a Maprisma
+app is installed (Settings › "Show the Maprisma pages", on by default); **Plugins** appears
+automatically when at least one other user plugin is installed besides Settings Manager itself
+(Settings › "Show the Plugins page", on by default).
 
-- **Plugins**: every installed plugin, grouped *In the bar*, *Running in the background* and *Not in
-  use*, with a filter, update marks and a ⋮ menu: put it in the bar (left, before or after the centre,
-  tray, right), take it out, switch services and panels on or off, update, open its folder, GitHub and
-  marketplace pages, remove. A click opens its **details**: what it is, where it sits in the bar (move it
-  with ← / → or "Move to"), and the settings stored in its bar entry in `shell.json`, editable (switches,
-  numbers, text; lists and objects as JSON).
-- **Bar**: the bar as it is now, left to right, Omarchy's own widgets included, each section with its
-  widgets in order, plus a **Not in the bar** section at the bottom for installed bar widgets not
-  currently placed. Drag a row by its handle onto another row (it goes before that one), onto an empty
-  section or onto an area of the bar preview (it goes to its end); drag a widget from *Not in the bar*
-  into any section (or click `+`), or drag a removable widget onto *Not in the bar* to take it out.
-  Focused bar rows also support keyboard reordering (`Left` / `Right` to move, `Delete` to take out).
-- **Updates**: the plugins whose git checkout is behind its remote, with the commits an update brings;
-  Update or Update all. Plugins without a git remote are listed as "update by hand".
-- **Maprisma apps**: the Maprisma apps on this computer (release archive in `~/.local/lib`, AppImage in
-  `~/Applications`, pacman package, or built from source), with version, a *running* mark and an update
-  mark from each app's latest GitHub release (asked on page load / Refresh only, unauthenticated, cached
-  10 min). ⋮ menu: Open, Details, Show folder, GitHub/release page, remove older AppImage copies (to the
-  trash). Updates and uninstalls of installed apps open **Maprisma Settings** at its Apps page (it swaps
-  running apps safely). Catalog apps that aren't installed and have a release AppImage get **Install**:
-  a visible terminal downloads the AppImage into `~/Applications`, checks GitHub's SHA-256 and never
-  replaces a file (Maprisma Launcher's method). No password needed.
-- **System apps**: every app with a launcher, by source: System packages (explicitly installed pacman
+- **Apps**: every app with a launcher, by source: System packages (explicitly installed pacman
   packages), AUR, Flatpak, AppImages (older copies grouped), Web apps (Omarchy's and browsers') and
   Local apps (other launchers, Omarchy TUIs). Marks for updates (`checkupdates`, `yay`/`paru -Qua`,
   `flatpak remote-ls --updates`), running and start at login; filter; Details (`pacman -Qi`,
@@ -70,7 +52,22 @@ Maprisma pages" (on by default) hides them.
   has no partial upgrades). Flatpak uninstall/update, web app and TUI removal (`omarchy-webapp-remove`,
   `omarchy-tui-remove`) run in the same visible terminal without a password; AppImages and local
   launchers go to the trash (`gio trash`). Every action asks first.
-- **Network**: Wi-Fi, wired and VPN connections via NetworkManager (`nmcli`) or `iwd` (`iwctl`),
+- **Maprisma Apps**: the Maprisma apps on this computer (release archive in `~/.local/lib`, AppImage in
+  `~/Applications`, pacman package, or built from source), with version, a *running* mark and an update
+  mark from each app's latest GitHub release (asked on page load / Refresh only, unauthenticated, cached
+  10 min). ⋮ menu: Open, Details, Show folder, GitHub/release page, remove older AppImage copies (to the
+  trash). Updates and uninstalls of installed apps open **Maprisma Settings** at its Apps page (it swaps
+  running apps safely). Catalog apps that aren't installed and have a release AppImage get **Install**:
+  a visible terminal downloads the AppImage into `~/Applications`, checks GitHub's SHA-256 and never
+  replaces a file (Maprisma Launcher's method). No password needed.
+- **Plugins**: every installed plugin, grouped *In the bar*, *Running in the background* and *Not in
+  use*, with a filter, inline update checks (**Check for updates**, **Update all**, and an *Updates
+  available* group with expandable incoming commit lists), and a ⋮ menu: put it in the bar (left,
+  before or after the centre, tray, right), take it out, switch services and panels on or off, update,
+  open its folder, GitHub and marketplace pages, remove. A click opens its **details**: what it is,
+  where it sits in the bar (move it with ← / → or "Move to"), and the settings stored in its bar entry
+  in `shell.json`, editable (switches, numbers, text; lists and objects as JSON).
+- **Network & Wireless**: Wi-Fi, wired and VPN connections via NetworkManager (`nmcli`) or `iwd` (`iwctl`),
   LAN devices and live traffic/socket monitor. Wi-Fi passphrases are never passed on a command line.
 - **Bluetooth**: adapter power, scan, pair/connect/disconnect, trust and remove Bluetooth devices via
   `bluetoothctl`.
@@ -84,6 +81,15 @@ Maprisma pages" (on by default) hides them.
   Manager is installed its favourites get a star, its hidden themes stay out until the eye button
   shows them (both read only), and **More in Theme Manager…** opens it. Only JPEG, PNG and still WebP
   pictures are shown (checked, size-capped, metadata removed before decoding).
+- **Bar**: Maprisma-style chip cards for Omarchy's six bar areas (Left, Before the centre, Centre,
+  After the centre, Tray, Right) plus **Not in the bar** below. Drag chips between areas or slots to
+  reorder, drag from *Not in the bar* into any area to add, or drop a removable chip onto *Not in the
+  bar* to take it out. Double-click a plugin chip to open its details/settings. Focused chips support
+  keyboard reordering (`Left`/`Right` along the bar, `Up`/`Down` between areas, `Delete` to take out,
+  `Enter` to place). Includes an **Icon Picker** (`Change icon…`) for installed Maprisma bar/tray
+  hicolor SVGs (and any widget exposing an `icon` setting): browse your installed icon theme's symbolic
+  SVGs, an optional online gallery (Lucide, Tabler, Material Design, Bootstrap), choose your own SVG
+  file, or reset to the original.
 - **Displays**: live Hyprland monitor layout, resolution, refresh rate, scale, transform, position
   and VRR via `hyprctl` with opt-in persistence.
 - **Sound**: PipeWire/PulseAudio output and input devices, volumes, mute switches and per-app streams
@@ -126,16 +132,16 @@ Maprisma pages" (on by default) hides them.
   user autostart entries in `~/.config/autostart`.
 - **About**: hardware, OS, kernel, Omarchy version, compositor and session facts with one-click copy.
 - **Settings**: language (8 built in), update check on opening, Omarchy's own plugins in the list,
-  the Maprisma pages, Corners (like the windows, slightly rounded, rounded, square), F12 screenshot key, and app details.
+  the Maprisma pages, the Plugins page, Corners (like the windows, slightly rounded, rounded, square), F12 screenshot key, and app details.
 
-Keys: `Ctrl+1…9` first nine pages in current sidebar order · `Ctrl+,` Settings · `Ctrl+F` filter
-(the open page's own filter, else the plugins) · `F5` / `Ctrl+R` reload current page · `Backspace` back from plugin details · `Esc` close
-overlay sidebar, go back, or close window · `F12` save a screenshot of the window into
+Keys: `Ctrl+1…9` first nine visible pages in current sidebar order · `Ctrl+B` Bar · `Ctrl+,` Settings · `Ctrl+F` filter
+(the open page's own filter, else Apps) · `F5` / `Ctrl+R` reload current page · `Backspace` back from plugin details · `Esc` close
+overlay sidebar, go back to Apps, or close window · `F12` save a screenshot of the window into
 `~/Pictures/Settings Manager/` (private folder, never over an older file) with an optional note
 beside it.
 
-The bar icon opens or closes the window; right-click opens the Updates page. From a terminal:
-`settings-manager [--page plugins|bar|updates|apps|system_apps|network|bluetooth|appearance|theme|displays|sound|notifications|ai|voice|power|optimize|input|applications|time|about|settings] [--plugin <id>]`.
+The bar icon opens or closes the window; right-click opens the Plugins page. From a terminal:
+`settings-manager [--page system_apps|apps|plugins|network|bluetooth|appearance|theme|bar|displays|sound|notifications|ai|voice|power|optimize|input|applications|time|about|settings] [--plugin <id>]` (`--page updates` is accepted as an alias for `plugins`).
 
 ## How it changes things
 
@@ -159,8 +165,8 @@ asks for the administrator password itself:
 No value ever reaches a shell: scripts are constant strings, values go in as positional arguments and
 are checked again inside the script. Nothing runs as root in the background.
 
-- **Plugins & Bar**: every change goes through Omarchy's own plugin commands and the shell's IPC;
-  the app never writes `shell.json` or a plugin folder itself:
+- **Plugins & Bar**: every plugin and bar layout change goes through Omarchy's own plugin commands
+  and the shell's IPC; Plugins & Bar never write `shell.json` or a plugin folder itself:
 
 | Action | Command |
 | --- | --- |
@@ -189,6 +195,15 @@ are checked again inside the script. Nothing runs as root in the background.
   for installing or removing a dictation backend, and only in the visible terminal Omarchy's own
   installer opens (`omarchy-launch-floating-terminal-with-presentation omarchy-install-dictation-…`).
 
+- **Bar icon changes**: for installed Maprisma hicolor symbolic icons
+  (`~/.local/share/icons/hicolor/scalable/apps/io.github.ubruckhaus.*-symbolic.svg` and sibling state
+  variants), the Icon Picker validates every SVG (256 KiB cap, strict XML/SVG validator — no scripts,
+  DOCTYPE/entities, processing instructions, disallowed namespaces, event handlers, external references
+  or CSS escapes), backs up the original under
+  `~/.config/omarchy/settings-manager/icons/` for Reset, writes atomically (`O_EXCL`, `0644`), and
+  refreshes the user icon cache (`gtk-update-icon-cache`). For Omarchy bar widgets that expose an
+  `icon` setting in `shell.json`, edits go through `omarchy-shell shell setBarWidget`.
+
 The update check runs `git fetch origin HEAD` in each plugin checkout (as `omarchy plugin update` does)
 and counts the new commits; nothing is merged until you press Update.
 
@@ -199,13 +214,16 @@ with its process group. Text from manifests and system tools is cleaned before i
 
 - **Network:** the update check runs `git fetch` against each plugin checkout's `origin`, only when that
   is an https URL (you can turn the check off in Settings). When you open or refresh a page:
-  Maprisma apps asks GitHub's releases API for each app's latest release (`curl`, unauthenticated, cached
-  10 min) and System apps asks the update tools (`checkupdates`, `yay`/`paru -Qua`,
+  Maprisma Apps asks GitHub's releases API for each app's latest release (`curl`, unauthenticated, cached
+  10 min) and Apps asks the update tools (`checkupdates`, `yay`/`paru -Qua`,
   `flatpak remote-ls --updates`). Everything else only when you click it: Update (Omarchy's `git pull`),
-  installing a Maprisma AppImage from GitHub (SHA-256 checked), system/Flatpak updates and dictation
-  installers in a visible terminal, the DNS speed test (two small UDP queries per resolver), Network
-  page connection actions, and GitHub or marketplace links, which open in your browser. Settings
-  Manager does not install plugins.
+  installing a Maprisma AppImage from GitHub (SHA-256 checked), system/Flatpak updates, dictation
+  installers and Voxtype model setup in a visible terminal, mirror ranking (on non-pinned systems),
+  the DNS speed test (two small UDP queries per resolver), Network page connection actions, the Icon
+  Picker's optional **Online gallery** tab (Iconify SVG packs from `cdn.jsdelivr.net`, allowlisted to
+  Lucide, Tabler, Material Design and Bootstrap, `curl --proto =https`, 6 MiB cap, cached 7 days in
+  `~/.cache/omarchy-settings-manager/icon-gallery/`, every SVG validated before display or saving),
+  and GitHub or marketplace links, which open in your browser. Settings Manager does not install plugins.
 - **Updating and removing plugins** is only done when you press the button and, for remove, confirm a
   dialog. It runs Omarchy's own `omarchy-plugin-update` and `-remove` (argv, never a shell). Settings
   Manager refuses to remove itself.
@@ -232,7 +250,8 @@ with its process group. Text from manifests and system tools is cleaned before i
 
 ## Files
 
-- `settings_manager.py`: the GTK 4 / libadwaita window, sidebar, Plugins, Bar, Updates and Settings pages
+- `settings_manager.py`: the GTK 4 / libadwaita window, Maprisma-style sidebar, Plugins (with inline updates) and Settings pages
+- `pages_bar.py`, `icons_core.py`: chip-based Bar editor, Icon Picker dialog, SVG sanitizer, theme icon browser and Iconify gallery backend
 - `pages_system.py`: Displays, Sound, Bluetooth, Power and About pages
 - `pages_desktop.py`: Network, Appearance, Input devices and Applications pages
 - `ui_helpers.py`: shared GTK 4 / libadwaita helpers, markup escaping and guarded text fields

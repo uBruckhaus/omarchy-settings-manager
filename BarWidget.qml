@@ -5,7 +5,7 @@ import qs.Ui
 
 // The bar icon toggles Settings Manager: closes it when it is the window in front, else starts it
 // or brings it to the front (a normal app window; the app itself keeps one instance).
-// Right-click opens its Updates page.
+// Right-click opens its Plugins page.
 BarWidget {
   id: root
 
@@ -26,7 +26,7 @@ BarWidget {
     onPressed: function(mouseButton) {
       if (!root.bar) return
       if (mouseButton === Qt.RightButton)
-        Quickshell.execDetached([root.launcherPath, "--page", "updates"])
+        Quickshell.execDetached([root.launcherPath, "--page", "plugins"])
       else
         Quickshell.execDetached([root.launcherPath, "--toggle"])
     }

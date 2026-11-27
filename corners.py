@@ -23,7 +23,7 @@ def parse_rounding(text):
     """The window rounding from Hyprland's `getoption decoration:rounding` JSON, or None."""
     try:
         value = json.loads(text).get("int")
-    except (ValueError, TypeError, AttributeError):
+    except (ValueError, TypeError, AttributeError, RecursionError):
         return None
     if isinstance(value, bool) or not isinstance(value, int):
         return None

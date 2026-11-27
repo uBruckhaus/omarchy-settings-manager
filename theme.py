@@ -66,7 +66,7 @@ def css(colors: dict, radius: int = 8) -> str:
         "window-bg-color": bg, "window-fg-color": fg, "view-bg-color": bg, "view-fg-color": fg,
         "headerbar-bg-color": bg, "headerbar-fg-color": fg, "popover-bg-color": bg, "popover-fg-color": fg,
         "dialog-bg-color": bg, "dialog-fg-color": fg, "card-bg-color": card, "card-fg-color": fg,
-        "sidebar-bg-color": card, "sidebar-fg-color": fg, "accent-color": accent, "accent-bg-color": accent,
+        "sidebar-bg-color": bg, "sidebar-fg-color": fg, "accent-color": accent, "accent-bg-color": accent,
         "accent-fg-color": bg, "destructive-color": red, "destructive-bg-color": red, "destructive-fg-color": bg,
         "success-color": green, "success-bg-color": green, "success-fg-color": bg, "warning-color": yellow,
         "warning-bg-color": yellow, "warning-fg-color": bg, "error-color": red, "error-bg-color": red,
@@ -76,13 +76,15 @@ def css(colors: dict, radius: int = 8) -> str:
             # Hyprland rounds (or not) the window itself.
             "window#settingsmanager-window { border-radius: 0; }\n"
             "window#settingsmanager-window button { font-weight: normal; }\n"
-            f".sm-sidebar-scroll {{ background: {card}; }}\n"
-            f".sm-sidebar {{ background: {card}; padding: 8px 6px; }}\n"
-            f".sm-sidebar row {{ border-radius: {min(radius, 16)}px; padding: 6px 10px; margin-bottom: 4px; }}\n"
+            f".sm-sidebar-scroll {{ margin: 8px 0 8px 8px; border-radius: {radius}px; background: {card}; }}\n"
+            ".sm-sidebar { padding: 8px; background: transparent; }\n"
+            f".sm-sidebar row {{ min-height: 32px; padding: 0 14px; margin-bottom: 6px; border-radius: {min(radius, 16)}px; }}\n"
+            f".sm-sidebar row:hover {{ background: color-mix(in srgb, {fg} 8%, transparent); }}\n"
             f".sm-sidebar row:selected {{ background: color-mix(in srgb, {fg} 12%, transparent); color: {accent}; }}\n"
             f".sm-sidebar row:selected label {{ color: {accent}; font-weight: 600; }}\n"
+            f".sm-sidebar row:selected image {{ color: {accent}; }}\n"
             f".sm-sidebar row:selected label.sm-pill {{ color: {bg}; }}\n"
-            f".sm-sidebar row.sm-sep {{ padding: 4px 8px; min-height: 12px; margin-bottom: 4px; border-radius: {min(radius, 8)}px; }}\n"
+            f".sm-sidebar row.sm-sep {{ padding: 0 8px; min-height: 12px; margin-bottom: 6px; border-radius: {min(radius, 8)}px; }}\n"
             f".sm-sidebar row.sm-sep:hover {{ background: color-mix(in srgb, {fg} 6%, transparent); }}\n"
             f".sm-sidebar row.sm-sep separator {{ min-height: 1px; background: color-mix(in srgb, {fg} 18%, transparent); }}\n"
             f".sm-dim {{ color: {muted}; }}\n"
@@ -90,14 +92,17 @@ def css(colors: dict, radius: int = 8) -> str:
             f".sm-pill-dim {{ background: color-mix(in srgb, {fg} 12%, transparent); color: {fg}; border-radius: 999px; padding: 1px 8px; font-size: 0.85em; }}\n"
             f".sm-warn {{ color: {yellow}; }}\n"
             f".sm-ok {{ color: {green}; }}\n"
-            f".sm-bar {{ background: {card}; border-radius: {radius}px; padding: 6px; }}\n"
-            f".sm-zone {{ border: 1px dashed color-mix(in srgb, {fg} 25%, transparent); border-radius: {min(radius, 6)}px; padding: 4px; min-height: 28px; }}\n"
-            f".sm-chip {{ background: color-mix(in srgb, {fg} 10%, transparent); border-radius: {min(radius, 6)}px; padding: 2px 8px; font-size: 0.85em; }}\n"
-            f".sm-chip.mine {{ background: color-mix(in srgb, {accent} 35%, transparent); }}\n"
-            f".sm-chip.selected {{ background: {accent}; color: {bg}; }}\n"
+            f".sm-bar-area {{ background: color-mix(in srgb, {fg} 4%, {bg}); border: 1px solid color-mix(in srgb, {fg} 15%, transparent); border-radius: {radius}px; padding: 10px 12px; }}\n"
+            f".sm-bar-area.sm-drop {{ border-color: {accent}; background: color-mix(in srgb, {accent} 8%, {card}); box-shadow: none; }}\n"
+            f".sm-bar-chip {{ background: color-mix(in srgb, {fg} 7%, {bg}); border: 1px solid color-mix(in srgb, {fg} 14%, transparent); border-radius: {min(radius, 10)}px; padding: 4px 10px; }}\n"
+            f".sm-bar-chip.mine {{ background: color-mix(in srgb, {accent} 18%, {bg}); border-color: color-mix(in srgb, {accent} 35%, transparent); }}\n"
+            f".sm-bar-chip.selected, .sm-bar-chip:focus {{ border: 2px solid {accent}; padding: 3px 9px; }}\n"
+            f".sm-bar-chip.sm-drop {{ box-shadow: inset 3px 0 {accent}; }}\n"
+            f".sm-icon-changed {{ color: {accent}; }}\n"
+            f".sm-icon-tile {{ border-radius: {min(radius, 10)}px; padding: 6px; border: 1px solid transparent; }}\n"
+            f"flowbox.sm-icon-grid > flowboxchild:selected .sm-icon-tile {{ background: color-mix(in srgb, {accent} 20%, transparent); border-color: {accent}; }}\n"
             ".sm-log { font-family: monospace; font-size: 0.85em; }\n"
             f".sm-drop {{ box-shadow: inset 0 2px {accent}; }}\n"
-            f".sm-zone.sm-drop {{ border-color: {accent}; box-shadow: none; }}\n"
             ".sm-dragging { opacity: 0.4; }\n"
             # The Corners setting: cards, lists, buttons and fields.
             f"list.boxed-list, .card {{ border-radius: {radius}px; }}\n"
