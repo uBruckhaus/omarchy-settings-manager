@@ -122,7 +122,6 @@ FORBIDDEN_NAMESPACES = frozenset({
     "http://www.w3.org/1998/math/mathml",
 })
 
-_URL_RE = re.compile(r"url\(\s*([^)]*)(?:\)|$)")
 # The only reference an icon may make: to an element of its own (`#id`, or url(#id) / url('#id')).
 _FRAGMENT_RE = re.compile(r"#[A-Za-z0-9_][A-Za-z0-9_.:-]{0,127}")      # Breeze uses ids like "0"
 _CSS_URL_ARG_RE = re.compile(r"""(?:#[a-z0-9_][a-z0-9_.:-]{0,127}|'#[a-z0-9_][a-z0-9_.:-]{0,127}'|"#[a-z0-9_][a-z0-9_.:-]{0,127}")""")
@@ -379,7 +378,7 @@ def svg_problem(data: bytes) -> str | None:
             if not isinstance(e.tag, str):
                 continue
             for name in ("id", "{http://www.w3.org/XML/1998/namespace}id"):
-                value = e.get(name)
+                value = (e.get(name) or "").strip()     # some renderers trim xml:id
                 if value:
                     by_id.setdefault(value, []).append(e)
         for ref in set(uses):
@@ -614,6 +613,8 @@ def theme_svgs(chain: list[str], symbolic_only: bool = True) -> dict[str, dict]:
                             if not base_name.endswith(".svg"):
                                 continue
                             icon_name = base_name[:-4]
+                            if not ICON_NAME_RE.match(icon_name) or ".." in icon_name:
+                                continue      # a name the picker could not choose (spaces, "gallery:", …)
                             if symbolic_only and not icon_name.endswith("-symbolic"):
                                 continue
                             full_path = entry.path
@@ -944,6 +945,7 @@ class _PackIndex:
         self._aliases = aliases
         self._default_order = default_order
         self._validated: dict[str, str | None] = {}
+        self._validated_lock = threading.Lock()
 
     @classmethod
     def parse(cls, text: str) -> _PackIndex | None:
@@ -1018,11 +1020,13 @@ class _PackIndex:
         canonical = name if name in self._raw else self._aliases.get(name)
         if canonical is None:
             return None
-        if canonical in self._validated:
-            return self._validated[canonical]
+        with self._validated_lock:
+            if canonical in self._validated:
+                return self._validated[canonical]
         body, left, top, width, height = self._raw[canonical]
         svg = build_gallery_svg(body, left=left, top=top, width=width, height=height)
-        self._validated[canonical] = svg
+        with self._validated_lock:
+            self._validated[canonical] = svg
         return svg
 
     def _rank_candidates(self, query: str) -> list[str]:
@@ -1118,13 +1122,20 @@ def _download_pack(pack: dict[str, str], fetcher=None) -> tuple[str | None, str 
 
 
 def _read_gallery_cache(path: Path) -> tuple[_PackIndex, float, int] | None:
+    # Only from a folder of our own (not a link, ours, not writable by others) and a file of ours.
     try:
-        fd = os.open(str(path), os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | os.O_NOFOLLOW)
+        dfd = _open_owned_dir_fd(path.parent, private=False)
     except OSError:
         return None
     try:
+        fd = os.open(path.name, os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=dfd)
+    except OSError:
+        return None
+    finally:
+        os.close(dfd)
+    try:
         info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_size > GALLERY_MAX_BYTES:
+        if not stat.S_ISREG(info.st_mode) or info.st_size > GALLERY_MAX_BYTES or info.st_uid != os.getuid():
             os.close(fd)
             return None
         mtime = info.st_mtime
@@ -1149,13 +1160,27 @@ def _read_gallery_cache(path: Path) -> tuple[_PackIndex, float, int] | None:
     return index, mtime, mtime_ns
 
 
+_GALLERY_LOCK = threading.Lock()
+
+
 def _load_gallery_pack(
     pack: dict[str, str],
     *,
     refresh: bool = False,
     fetcher=None,
 ) -> tuple[_PackIndex | None, bool, bool, str | None]:
-    """Return `(index, cached, offline, error)`."""
+    """Return `(index, cached, offline, error)`. One load at a time: two searches never download
+    the same pack twice or race on the memory cache."""
+    with _GALLERY_LOCK:
+        return _load_gallery_pack_locked(pack, refresh=refresh, fetcher=fetcher)
+
+
+def _load_gallery_pack_locked(
+    pack: dict[str, str],
+    *,
+    refresh: bool = False,
+    fetcher=None,
+) -> tuple[_PackIndex | None, bool, bool, str | None]:
     cache_dir = GALLERY_CACHE_DIR
     cache_path = cache_dir / f"{pack['id']}.json"
     mem_key = (str(cache_dir), pack["id"])
@@ -1358,7 +1383,9 @@ def _adapt_variant_bytes(chosen_bytes: bytes, original_bytes: bytes) -> bytes:
     chosen_text = chosen_bytes.decode("utf-8", "replace")
     if "ColorScheme-Text" not in chosen_text:
         return chosen_bytes
-    return chosen_text.replace("ColorScheme-Text", "ColorScheme-Highlight").encode("utf-8")
+    adapted = chosen_text.replace("ColorScheme-Text", "ColorScheme-Highlight").encode("utf-8")
+    # Longer than the file it came from: never over the size a variant may be read back with.
+    return adapted if len(adapted) <= MAX_ICON_BYTES else chosen_bytes
 
 
 def _refresh_icon_cache() -> None:

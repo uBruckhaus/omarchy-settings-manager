@@ -111,6 +111,27 @@ class SvgProblemTest(unittest.TestCase):
         why = ic.svg_problem(self.wrap('<use href="' + "x" * 5000 + '"/>'))
         self.assertLess(len(why), 200)
 
+    def test_xml_id_with_spaces_still_counts(self):
+        nested = ('<defs><g id="a"><path d="M0 0h1v1z"/></g><g xml:id=" b "><use href="#a"/></g></defs>'
+                  '<use href="#b"/>')
+        self.assertIn("<use>", ic.svg_problem(self.wrap(nested)))
+
+    def test_highlight_variant_never_grows_over_the_size_cap(self):
+        original = b'<svg><style>.ColorScheme-Highlight{}</style></svg>'
+        chosen = b"ColorScheme-Text " * 15000          # 255000 bytes, +5 per mention when adapted
+        self.assertLessEqual(len(chosen), ic.MAX_ICON_BYTES)
+        self.assertEqual(ic._adapt_variant_bytes(chosen, original), chosen)
+        small = b'<path class="ColorScheme-Text"/>'
+        self.assertIn(b"ColorScheme-Highlight", ic._adapt_variant_bytes(small, original))
+
+    def test_gallery_cache_only_from_a_private_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "cache"
+            folder.mkdir(mode=0o700)
+            (folder / "lucide.json").write_text('{"icons": {}}')
+            os.chmod(folder, 0o777)                     # writable by others: not read from
+            self.assertIsNone(ic._read_gallery_cache(folder / "lucide.json"))
+
     def test_one_icon_change_at_a_time(self):
         with ic._ICON_CHANGE_LOCK:
             self.assertEqual(ic.set_icon("io.github.ubruckhaus.MaprismaX-symbolic", "x"), (False, ic.BUSY_MESSAGE))

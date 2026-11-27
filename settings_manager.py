@@ -850,7 +850,10 @@ class SettingsManager(Adw.Application):
             return GLib.SOURCE_REMOVE
 
         def work():
-            result = core.run(["omarchy", "restart", "shell"], timeout=self.SHELL_RESTART_TIMEOUT)
+            try:
+                result = core.run(["omarchy", "restart", "shell"], timeout=self.SHELL_RESTART_TIMEOUT)
+            except Exception as exc:          # never leave "restarting" set for good
+                result = core.Result(None, "", f"{type(exc).__name__}: {exc}")
             GLib.idle_add(finished, result)
 
         threading.Thread(target=work, daemon=True).start()

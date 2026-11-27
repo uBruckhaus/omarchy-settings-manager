@@ -1175,6 +1175,8 @@ class IconPickerDialog(Adw.Dialog):
             self._update_controls()
             if self._source == "theme":
                 self._render_theme_grid()
+            elif self._source == "gallery" and self._gallery_loaded and not self._gallery_loading:
+                self._render_gallery_grid()      # it loaded first and showed nothing then
 
         run_async(self.app, worker, done)
 
@@ -1263,6 +1265,8 @@ class IconPickerDialog(Adw.Dialog):
         # can't be opened and changed a second time meanwhile.
         if getattr(self, "_cancel_btn", None) is not None:
             self._cancel_btn.set_sensitive(not busy)
+        if getattr(self, "_flow", None) is not None:
+            self._flow.set_sensitive(changeable and not busy)
         self.set_can_close(not busy)
 
     def _set_banner_error(self, text: str) -> None:
@@ -1388,6 +1392,8 @@ class IconPickerDialog(Adw.Dialog):
     # --- selection & actions -------------------------------------------------------------------
 
     def _on_tile_selected(self, flow: Gtk.FlowBox) -> None:
+        if self._working:
+            return
         children = flow.get_selected_children()
         if not children:
             return
