@@ -200,8 +200,8 @@ are checked again inside the script. Nothing runs as root in the background.
 - **Bar icon changes**: for installed Maprisma hicolor symbolic icons
   (`~/.local/share/icons/hicolor/scalable/apps/io.github.ubruckhaus.*-symbolic.svg` and sibling state
   variants), the Icon Picker validates every SVG (256 KiB cap, strict XML/SVG validator — no scripts,
-  DOCTYPE/entities, processing instructions, disallowed namespaces, event handlers, external references
- , CSS escapes or CSS comments; element, `<use>` and filter counts capped), backs up the original under
+  DOCTYPE/entities, processing instructions, disallowed namespaces, event handlers, external references,
+  CSS escapes or CSS comments; element, `<use>` and filter counts capped), backs up the original under
   `~/.config/omarchy/settings-manager/icons/` for Reset, writes atomically (`O_EXCL`, `0644`), and
   refreshes the user icon cache (`gtk-update-icon-cache`), then restarts the shell so the bar shows it
   (see "Shell restart"). For Omarchy bar widgets that expose an
