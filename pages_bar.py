@@ -1259,6 +1259,11 @@ class IconPickerDialog(Adw.Dialog):
         can_reset = changeable and not busy and current not in (None, "original")
         self._reset_btn.set_sensitive(can_reset)
         self._apply_btn.set_sensitive(changeable and not busy and bool(self._selected_spec))
+        # While a change or reset runs the dialog stays open (no Cancel, no Esc), so the same icon
+        # can't be opened and changed a second time meanwhile.
+        if getattr(self, "_cancel_btn", None) is not None:
+            self._cancel_btn.set_sensitive(not busy)
+        self.set_can_close(not busy)
 
     def _set_banner_error(self, text: str) -> None:
         self._error_lbl.set_text(text)
@@ -1471,6 +1476,7 @@ class IconPickerDialog(Adw.Dialog):
 
         def done(result):
             self._working = False
+            self.set_can_close(True)
             ok, msg = _pair(result)
             if ok:
                 # The shell keeps named tray icons cached while it runs: reload it so the bar shows it.
@@ -1495,6 +1501,7 @@ class IconPickerDialog(Adw.Dialog):
 
         def done(result):
             self._working = False
+            self.set_can_close(True)
             ok, msg = _pair(result)
             if ok:
                 self.app.toast(_("Icon reset to original. The bar reloads to show it."))

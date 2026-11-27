@@ -18,6 +18,7 @@ import os
 import re
 import shutil
 import stat
+import threading
 import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
@@ -122,6 +123,18 @@ FORBIDDEN_NAMESPACES = frozenset({
 })
 
 _URL_RE = re.compile(r"url\(\s*([^)]*)(?:\)|$)")
+# The only reference an icon may make: to an element of its own (`#id`, or url(#id) / url('#id')).
+_FRAGMENT_RE = re.compile(r"#[A-Za-z0-9_][A-Za-z0-9_.:-]{0,127}")      # Breeze uses ids like "0"
+_CSS_URL_ARG_RE = re.compile(r"""(?:#[a-z0-9_][a-z0-9_.:-]{0,127}|'#[a-z0-9_][a-z0-9_.:-]{0,127}'|"#[a-z0-9_][a-z0-9_.:-]{0,127}")""")
+_CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
+# Filters can make one small file slow to draw: a few are fine (Adwaita's colour icons use them).
+MAX_SVG_FILTER_PARTS = 16
+FILTER_ELEMENTS = frozenset({"filter", "feblend", "fecolormatrix", "fecomponenttransfer", "fecomposite",
+                             "feconvolvematrix", "fediffuselighting", "fedisplacementmap", "fedropshadow",
+                             "feflood", "fegaussianblur", "feimage", "femerge", "femorphology", "feoffset",
+                             "fespecularlighting", "fetile", "feturbulence"})
+MAX_SVG_ELEMENTS = 4000
+MAX_SVG_USES = 200
 _COMPACT_WS_RE = re.compile(r"[\x00-\x20]+")
 _CSS_EXTERNAL_RE = re.compile(r"(?:-webkit-)?image-set\s*\(|\bsrc\s*\(|\b(?:https?|file|data|vbscript)\s*:")
 _GTK_THEME_RE = re.compile(r"^\s*gtk-icon-theme-name\s*=\s*(.+?)\s*$")
@@ -228,19 +241,39 @@ def _css_problem(css: str) -> str | None:
     # CSS escapes (`u\72l(`, `@\69mport`) could hide a reference: refused, icons don't need them.
     if "\\" in css:
         return "a CSS escape (backslash)"
+    if "/*" in css or "*/" in css:
+        # Comments could hide where a url( ends: they are dropped first, an unclosed one is refused.
+        css = _CSS_COMMENT_RE.sub(" ", css)
+        if "/*" in css or "*/" in css:
+            return "an unclosed CSS comment"
     lower = css.lower()
     compact = _COMPACT_WS_RE.sub("", lower)
     if "@import" in compact:
         return "@import"
     if "javascript:" in compact or "vbscript:" in compact or "expression(" in compact:
         return "script in a style"
-    if _CSS_EXTERNAL_RE.search(lower):
+    if _CSS_EXTERNAL_RE.search(lower) or _CSS_EXTERNAL_RE.search(compact):
         return "an external reference in a style"
-    for match in _URL_RE.finditer(lower):
-        target = match.group(1).strip().strip("'\"").strip()
-        if not target.startswith("#"):
-            return f"a reference outside the file (url({target}))"
-    return None
+    # Every url( must be exactly url(#id): its argument runs to the first ")", so a url( hidden in a
+    # quoted string or followed by another reference never matches.
+    start = 0
+    while True:
+        at = compact.find("url(", start)
+        if at < 0:
+            return None
+        end = compact.find(")", at + 4)
+        if end < 0:
+            return "a url( that is not closed"
+        target = compact[at + 4:end]
+        if not _CSS_URL_ARG_RE.fullmatch(target):
+            return f"a reference outside the file (url({_snip(target)}))"
+        start = end + 1
+
+
+def _snip(text, limit: int = 80) -> str:
+    """Untrusted text for a message: control characters removed, at most `limit` characters."""
+    text = "".join(ch for ch in str(text) if ch.isprintable())
+    return text if len(text) <= limit else text[:limit] + "…"
 
 
 def _collect_text(element: ET.Element) -> str:
@@ -287,8 +320,10 @@ def svg_problem(data: bytes) -> str | None:
     if builder.pis:
         return f"has a processing instruction (<?{builder.pis[0]}?>)"
     if root.tag != SVG_ROOT_TAG:
-        return f"not an SVG (the root is <{root.tag}>)"
+        return f"not an SVG (the root is <{_snip(root.tag)}>)"
 
+    elements = filters = 0
+    uses: list[str] = []
     stack: list[tuple[ET.Element, int]] = [(root, 0)]
     while stack:
         elem, depth = stack.pop()
@@ -296,13 +331,20 @@ def svg_problem(data: bytes) -> str | None:
             return "nested too deeply"
         if not isinstance(elem.tag, str):
             continue
+        elements += 1
+        if elements > MAX_SVG_ELEMENTS:
+            return f"more than {MAX_SVG_ELEMENTS} elements"
         ns = _tag_namespace(elem.tag).lower()
         if ns in FORBIDDEN_NAMESPACES:
             return f"has a disallowed namespace ({ns})"
         local = _local_name(elem.tag)
         lname = local.lower()
         if lname in FORBIDDEN_ELEMENTS:
-            return f"has a <{local}> element"
+            return f"has a <{_snip(local)}> element"
+        if lname in FILTER_ELEMENTS:
+            filters += 1
+            if filters > MAX_SVG_FILTER_PARTS:
+                return f"more than {MAX_SVG_FILTER_PARTS} filter parts"
         if lname == "style":
             why = _css_problem(_collect_text(elem))
             if why is not None:
@@ -313,17 +355,33 @@ def svg_problem(data: bytes) -> str | None:
             val = (attr_val or "").strip()
             compact_val = _COMPACT_WS_RE.sub("", val.lower())
             if an.startswith("on"):
-                return f"has an event handler ({alocal})"
-            if an == "href" and not val.startswith("#"):
-                return f'links outside the file ({alocal}="{val}")'
+                return f"has an event handler ({_snip(alocal)})"
+            if an == "base":
+                return f"has {_snip(alocal)} (xml:base)"
+            if an == "href" and not _FRAGMENT_RE.fullmatch(val):
+                return f'links outside the file ({_snip(alocal)}="{_snip(val)}")'
+            if an == "href" and lname == "use":
+                uses.append(val[1:])
             why = _css_problem(val)
             if why is not None:
-                return f"has {why} in {alocal}"
+                return f"has {why} in {_snip(alocal)}"
             if "javascript:" in compact_val or "vbscript:" in compact_val:
-                return f"has a script URL in {alocal}"
+                return f"has a script URL in {_snip(alocal)}"
         for child in reversed(list(elem)):
             stack.append((child, depth + 1))
 
+    if len(uses) > MAX_SVG_USES:
+        return f"more than {MAX_SVG_USES} <use> elements"
+    if uses:
+        # A <use> of something that holds a <use> again could multiply on drawing: refused.
+        by_id = {e.get("id"): e for e in root.iter() if isinstance(e.tag, str) and e.get("id")}
+        for ref in set(uses):
+            target = by_id.get(ref)
+            if target is None:
+                continue
+            for inner in target.iter():
+                if isinstance(inner.tag, str) and _local_name(inner.tag).lower() == "use":
+                    return "a <use> of an element that holds another <use>"
     return None
 
 
@@ -639,6 +697,8 @@ def _variant_files(key: str) -> list[str]:
                     continue
                 if not (name.startswith(f"{stem}-") and name.endswith("-symbolic.svg")):
                     continue
+                if name[len(stem):] not in STATE_VARIANT_SUFFIXES:
+                    continue                     # another icon whose name starts like this one
                 try:
                     st = entry.stat(follow_symlinks=False)
                 except OSError:
@@ -1316,8 +1376,33 @@ def _check_target_regular(target: Path) -> tuple[bytes | None, str]:
     return raw, ""
 
 
+# One icon change or reset at a time: a reset that removes the backup folder while a change is
+# halfway through would lose the original icon.
+_ICON_CHANGE_LOCK = threading.Lock()
+BUSY_MESSAGE = "another icon change is still running"
+
+
 def set_icon(key: str, icon_spec: str, *, fetcher=None) -> tuple[bool, str]:
     """Replace changeable bar icon `key` (and its sibling state variants) with `icon_spec`."""
+    if not _ICON_CHANGE_LOCK.acquire(blocking=False):
+        return False, BUSY_MESSAGE
+    try:
+        return _set_icon(key, icon_spec, fetcher=fetcher)
+    finally:
+        _ICON_CHANGE_LOCK.release()
+
+
+def reset_icon(key: str) -> tuple[bool, str]:
+    """Restore original bar icon `key` (and its sibling state variants) and clean up backup state."""
+    if not _ICON_CHANGE_LOCK.acquire(blocking=False):
+        return False, BUSY_MESSAGE
+    try:
+        return _reset_icon(key)
+    finally:
+        _ICON_CHANGE_LOCK.release()
+
+
+def _set_icon(key: str, icon_spec: str, *, fetcher=None) -> tuple[bool, str]:
     if not valid_bar_icon_key(key):
         return False, "not a changeable bar icon"
 
@@ -1396,8 +1481,7 @@ def set_icon(key: str, icon_spec: str, *, fetcher=None) -> tuple[bool, str]:
     return True, "icon updated"
 
 
-def reset_icon(key: str) -> tuple[bool, str]:
-    """Restore original bar icon `key` (and its sibling state variants) and clean up backup state."""
+def _reset_icon(key: str) -> tuple[bool, str]:
     if not valid_bar_icon_key(key):
         return False, "not a changeable bar icon"
 

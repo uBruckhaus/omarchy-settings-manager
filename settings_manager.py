@@ -61,7 +61,7 @@ from ui_helpers import (  # noqa: E402, F401
 )
 
 APP_ID = "org.omarchy.settingsmanager"
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 CONFIG_DIR = Path.home() / ".config/omarchy/settings-manager"
 SETTINGS_FILE = CONFIG_DIR / "settings.json"
 i18n.SETTINGS_FILE = SETTINGS_FILE
@@ -236,6 +236,8 @@ class SettingsManager(Adw.Application):
         self._check_updates_now = False
         self.busy = False
         self._busy_count = 0
+        self._shell_restarting = False
+        self._shell_restart_again = False
         self._pending_updates = 0
         self._sidebar_popover = None
         self.loaded_pages: set[str] = set()
@@ -824,11 +826,34 @@ class SettingsManager(Adw.Application):
         toast.connect("button-clicked", lambda *_: self.restart_shell())
         self.toasts.add_toast(toast)
 
+    # omarchy-restart-shell itself waits up to 30 s for the old shell and 60 s for the new one:
+    # never end it halfway (that could leave no bar).
+    SHELL_RESTART_TIMEOUT = 180
+
     def restart_shell(self):
         """`omarchy restart shell` in the background (Omarchy 4.5 and 4.6). This window runs in a
-        scope of its own (uwsm app), so it stays open."""
-        threading.Thread(target=core.run, args=(["omarchy", "restart", "shell"],),
-                         kwargs={"timeout": 30}, daemon=True).start()
+        scope of its own (uwsm app), so it stays open. One restart at a time: one asked for while
+        another runs follows it once."""
+        if self._shell_restarting:
+            self._shell_restart_again = True
+            return
+        self._shell_restarting = True
+
+        def finished(result):
+            self._shell_restarting = False
+            if not result.ok:
+                why = result.text().splitlines()[-1][:200] if result.text() else ""
+                self.toast(_("The shell did not restart: {0}").format(why or _("no answer")))
+            if self._shell_restart_again:
+                self._shell_restart_again = False
+                self.restart_shell()
+            return GLib.SOURCE_REMOVE
+
+        def work():
+            result = core.run(["omarchy", "restart", "shell"], timeout=self.SHELL_RESTART_TIMEOUT)
+            GLib.idle_add(finished, result)
+
+        threading.Thread(target=work, daemon=True).start()
 
     # --- jobs ----------------------------------------------------------------------------------
 

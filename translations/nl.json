@@ -583,5 +583,7 @@
   "{0} s": "{0} s",
   "{0} total · {1} external · {2} listening": "{0} totaal · {1} extern · {2} luisterend",
   "{0} will no longer launch automatically at login.": "{0} wordt niet meer automatisch gestart bij het aanmelden.",
-  "{0} · Gateway: {1}": "{0} · Gateway: {1}"
+  "{0} · Gateway: {1}": "{0} · Gateway: {1}",
+  "The shell did not restart: {0}": "De shell is niet herstart: {0}",
+  "no answer": "geen antwoord"
 }

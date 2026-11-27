@@ -587,5 +587,7 @@
   "{0} s": "{0} s",
   "{0} total · {1} external · {2} listening": "{0} łącznie · {1} zewnętrznych · {2} nasłuchujących",
   "{0} will no longer launch automatically at login.": "{0} nie będzie już uruchamiane automatycznie przy logowaniu.",
-  "{0} · Gateway: {1}": "{0} · Brama: {1}"
+  "{0} · Gateway: {1}": "{0} · Brama: {1}",
+  "The shell did not restart: {0}": "Powłoka nie uruchomiła się ponownie: {0}",
+  "no answer": "brak odpowiedzi"
 }

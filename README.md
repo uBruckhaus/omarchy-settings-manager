@@ -203,7 +203,8 @@ are checked again inside the script. Nothing runs as root in the background.
   DOCTYPE/entities, processing instructions, disallowed namespaces, event handlers, external references
   or CSS escapes), backs up the original under
   `~/.config/omarchy/settings-manager/icons/` for Reset, writes atomically (`O_EXCL`, `0644`), and
-  refreshes the user icon cache (`gtk-update-icon-cache`). For Omarchy bar widgets that expose an
+  refreshes the user icon cache (`gtk-update-icon-cache`), then restarts the shell so the bar shows it
+  (see "Shell restart"). For Omarchy bar widgets that expose an
   `icon` setting in `shell.json`, edits go through `omarchy-shell shell setBarWidget`.
 
 The update check runs `git fetch origin HEAD` in each plugin checkout (as `omarchy plugin update` does)
@@ -240,7 +241,9 @@ with its process group. Text from manifests and system tools is cleaned before i
   fsync, rename) and only into a folder that is its own: not a link, owned by you, not writable by
   others (made `0700`).
 - **Shell restart:** after an update a "Restart the shell" button runs `omarchy restart shell` when you
-  press it.
+  press it. After the Icon Picker changes or resets a Maprisma bar icon it runs `omarchy restart shell`
+  by itself (the shell keeps a named tray icon cached while it runs, so the bar would keep the old one);
+  this window runs in a scope of its own and stays open.
 - **Untrusted text:** plugin manifests, commit subjects, system labels and `shell.json` keys are shown
   as plain text (control characters removed, markup escaped). Text fields read the clipboard only
   through `wl-paste` with a 16 KiB cap and a 2 s deadline, accept no text drops from other apps, and

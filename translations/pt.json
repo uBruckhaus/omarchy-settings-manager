@@ -583,5 +583,7 @@
   "{0} s": "{0} s",
   "{0} total · {1} external · {2} listening": "{0} no total · {1} externas · {2} à escuta",
   "{0} will no longer launch automatically at login.": "{0} não será mais iniciado automaticamente ao entrar.",
-  "{0} · Gateway: {1}": "{0} · Gateway: {1}"
+  "{0} · Gateway: {1}": "{0} · Gateway: {1}",
+  "The shell did not restart: {0}": "A shell não reiniciou: {0}",
+  "no answer": "sem resposta"
 }

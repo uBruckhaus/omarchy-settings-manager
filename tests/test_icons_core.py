@@ -54,6 +54,51 @@ class CornersRecursionTest(unittest.TestCase):
 
 
 class SvgProblemTest(unittest.TestCase):
+    def wrap(self, inner: str) -> bytes:
+        return ('<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" '
+                f'viewBox="0 0 16 16">{inner}</svg>').encode()
+
+    def test_review_payloads_hiding_references_are_refused(self):
+        """1.1.1 (agy): a url(# in a comment or string made the next reference look internal;
+        protocol-relative and local references, entity-encoded schemes and xml:base got through."""
+        for inner in ('<style>/* url(# */ .b { fill: url("//evil.example/track.png"); }</style><path class="b" d="M0 0h1v1z"/>',
+                      '<style>.a { content: "url(#a"; } .b { filter: url("/etc/passwd"); }</style>',
+                      '<style>/* url(# */ .b { fill: url("ht&#x09;tps://evil.example/x.svg#p"); }</style>',
+                      '<g xml:base="//evil.example/"><path d="M0 0h1v1z"/></g>',
+                      '<style>.a { fill: url(#a) } /* unclosed</style>',
+                      '<path fill="url(#a) url(//x)" d="M0 0h1v1z"/>',
+                      '<use href="#a b"/>'):
+            with self.subTest(inner=inner):
+                self.assertIsNotNone(ic.svg_problem(self.wrap(inner)))
+
+    def test_internal_references_and_comments_still_pass(self):
+        for inner in ("<style>/* Adwaita */ .a { fill: url(#grad1); stroke: url('#g2') }</style>",
+                      '<defs><linearGradient id="g"/></defs><path fill="url(#g)" d="M0 0h1v1z"/>',
+                      '<defs><path id="p" d="M0 0h1v1z"/></defs><use href="#p"/><use xlink:href="#p"/>',
+                      '<defs><path id="0" d="M0 0h1v1z"/></defs><use href="#0"/><path fill="url(#0)" d="M0 0h1v1z"/>'):
+            with self.subTest(inner=inner):
+                self.assertIsNone(ic.svg_problem(self.wrap(inner)))
+
+    def test_expensive_drawing_is_refused(self):
+        nested = '<defs><g id="a"><path d="M0 0h1v1z"/></g><g id="b"><use href="#a"/><use href="#a"/></g></defs><use href="#b"/>'
+        self.assertIn("<use>", ic.svg_problem(self.wrap(nested)))
+        self.assertIsNone(ic.svg_problem(self.wrap('<filter id="f"><feGaussianBlur stdDeviation="1"/></filter>')))
+        parts = '<feOffset dx="1"/>' * ic.MAX_SVG_FILTER_PARTS
+        self.assertIsNotNone(ic.svg_problem(self.wrap(f'<filter id="f">{parts}</filter>')))
+        many = "".join('<path d="M0 0h1v1z"/>' for _ in range(ic.MAX_SVG_ELEMENTS + 1))
+        self.assertIsNotNone(ic.svg_problem(self.wrap(many)))
+        uses = '<defs><path id="p" d="M0 0h1v1z"/></defs>' + '<use href="#p"/>' * (ic.MAX_SVG_USES + 1)
+        self.assertIsNotNone(ic.svg_problem(self.wrap(uses)))
+
+    def test_messages_are_short_and_plain(self):
+        why = ic.svg_problem(self.wrap('<use href="' + "x" * 5000 + '"/>'))
+        self.assertLess(len(why), 200)
+
+    def test_one_icon_change_at_a_time(self):
+        with ic._ICON_CHANGE_LOCK:
+            self.assertEqual(ic.set_icon("io.github.ubruckhaus.MaprismaX-symbolic", "x"), (False, ic.BUSY_MESSAGE))
+            self.assertEqual(ic.reset_icon("io.github.ubruckhaus.MaprismaX-symbolic"), (False, ic.BUSY_MESSAGE))
+
     def test_accepts_valid_svgs_including_xml_declaration_and_internal_refs(self):
         self.assertIsNone(ic.svg_problem(VALID_SVG))
         with_decl = (
